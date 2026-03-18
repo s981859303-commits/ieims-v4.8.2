@@ -1,0 +1,124 @@
+
+
+
+# Redis 配置
+
+spring:
+  # redis 配置
+  redis:
+    # 地址
+    host: localhost
+    # 端口，默认为6379
+    port: 6379
+    # 数据库索引
+    database: 0
+    # 密码
+    password: Guet@90-=
+    #password:
+    # 连接超时时间
+    timeout: 10s
+    lettuce:
+      pool:
+        # 连接池中的最小空闲连接
+        min-idle: 5
+        # 连接池中的最大空闲连接
+        max-idle: 100
+        # 连接池的最大数据库连接数
+        max-active: 8
+        # #连接池最大阻塞等待时间（使用负值表示没有限制）
+        max-wait: -1ms
+
+#  # MySQL 原有数据源配置
+#  datasource:
+#    druid:
+#      # MySQL 主数据源
+#      #      master:
+#      #        url: jdbc:mysql://localhost:3306/ry-vue?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=true&serverTimezone=GMT%2B8
+#      #        username: root
+#      #        password: root
+#      #        driver-class-name: com.mysql.cj.jdbc.Driver
+#      # TDengine 独立数据源
+#      tdengine:
+#        url: jdbc:TAOS://localhost:6030/ieims?charset=utf-8&locale=en_US.UTF-8
+#        username: root
+#        password: Guet@90-=
+#        driver-class-name: com.taosdata.jdbc.TSDBDriver
+
+#spring:
+#  redis:
+#    host: localhost
+#    port: 6379
+#    password:
+#    database: 0
+#    timeout: 10000ms
+#    lettuce:
+#      pool:
+#        max-active: 200
+#        max-wait: -1ms
+#        max-idle: 10
+#        min-idle: 5
+
+# MQTT 启动：E:\c_prog\emqx-5.3.2-windows-amd64\bin\emqx console  停止：emqx stop   强制停止：emqx kill
+
+mqtt:
+  client:
+    username: admin
+    password: Guet@90-=
+    broker: tcp://localhost:1883
+    clientId: ieims-client-${random.value}
+    defaultTopic: ieims/ieims_data_topic
+    connectTimeout: 30
+    keepAliveInterval: 60
+    # 自动重连（生产环境必备）
+    automaticReconnect: true
+
+#  # TDengine 配置
+#  # TDengine 配置
+#  driver-class-name: com.taosdata.jdbc.TSDBDriver
+#  url: jdbc:TAOS://localhost:6030/ieims?user=root&password=Guet@90-=
+#  maxActive: 10
+#  maxIdle: 5
+#  minIdle: 2
+#  initialSize: 2
+
+#注意：TDengine 3.x 默认使用 RESTful 接口，连接 URL 前缀应为 jdbc:TAOS-RS://，端口为 6041。
+#如果服务器是原生驱动模式，URL 前缀为 jdbc:TAOS://，端口为 6030，但驱动类名仍需是 RestfulDriver。
+# TDengine + Druid 配置（module1 专属）
+tdengine:
+  # 3.x 版本推荐使用 RESTful 连接方式
+#  url: jdbc:TAOS-RS://127.0.0.1:6041/ieims?charset=utf-8&locale=en_US.UTF-8
+#  driver-class-name: com.taosdata.jdbc.rs.RestfulDriver
+
+  # 原生 JDBC URL（替换 RS 为原生驱动，端口 6030）  taos -u root -pGuet@90-= -d ieims   dbev jdbc:TAOS://127.0.0.1:6030/ieims?charset=utf-8&locale=en_US.UTF-8
+  url: jdbc:TAOS://127.0.0.1:6030/ieims?charset=utf-8&locale=en_US.UTF-8
+  # 原生驱动类名（适配 6030 端口）
+  driver-class-name: com.taosdata.jdbc.TSDBDriver
+  username: root
+  password: taosdata
+  # Druid 连接池参数（覆盖公共模块默认值）
+  druid:
+    initial-size: 3        # 初始化连接数
+    max-active: 15         # 最大活跃连接数
+    min-idle: 3            # 最小空闲连接数
+    max-wait: 30000        # 获取连接最大等待时间（ms）
+    time-between-eviction-runs-millis: 60000 # 连接检测间隔
+    min-evictable-idle-time-millis: 300000   # 连接最小空闲时间
+    test-while-idle: true  # 空闲时检测连接
+    test-on-borrow: false  # 获取连接时不检测
+    test-on-return: false  # 归还连接时不检测
+    validation-query: SELECT 1  # 新增：解决 testWhileIdle 警告
+    validation-query-timeout: 3000  # 新增：查询超时时间
+
+#
+#  # 可选：Druid 监控页面配置（企业级特性）
+#  spring:
+#    druid:
+#      stat-view-servlet:
+#        enabled: true        # 开启监控页面
+#        url-pattern: /druid/* # 监控页面访问路径
+#        login-username: admin # 登录账号
+#        login-password: admin123 # 登录密码
+#      web-stat-filter:
+#        enabled: true        # 开启 Web 统计
+#        url-pattern: /*
+#        exclusions: "*.js,*.gif,*.jpg,*.png,*.css,*.ico,/druid/*" # 排除静态资源

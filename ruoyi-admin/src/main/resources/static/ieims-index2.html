@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>IEIMS系统 - 测试首页</title>
+    <!-- 1. 引入若依自带CSS（保证风格统一，无需自己写导航栏样式） -->
+    <link rel="stylesheet" href="/css/ruoyi.css?v=4.6.0">
+    <link rel="stylesheet" href="/plugins/layui/css/layui.css">
+    <style>
+        /* 2. 若依导航栏固定顶部，此处设置主体区域样式（避开导航栏，保留核心居中效果） */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        /* 主体容器：避开顶部导航栏（若依导航栏默认高度60px），实现下方全屏居中 */
+        .main-container {
+            width: 100%;
+            height: calc(100vh - 60px); /* 视口高度减去导航栏高度 */
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            background-color: #f2f3f5; /* 若依默认后台背景色，保持统一 */
+        }
+        /* 3. 标题样式（适配若依字体、颜色） */
+        .page-title {
+            font-size: 28px;
+            font-weight: 600;
+            color: #333; /* 若依默认正文颜色 */
+            margin-bottom: 25px;
+            text-align: center;
+            font-family: "Microsoft YaHei", sans-serif; /* 若依默认字体 */
+        }
+        /* 4. 图片样式（保留圆角、阴影，适配若依风格） */
+        .page-img {
+            max-width: 700px;
+            max-height: 450px;
+            border-radius: 8px;
+            box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08); /* 若依默认阴影强度，更柔和 */
+            border: 1px solid #e6e6e6; /* 若依默认边框，提升质感 */
+        }
+    </style>
+</head>
+<body class="layui-layout-body">
+<!-- 5. 若依标准顶部导航栏（复刻后台样式，可直接复用） -->
+<div class="layui-header header">
+    <div class="layui-logo layui-bg-black">
+        <!-- 若依默认logo（可替换为自己的logo，保持路径正确即可） -->
+        <img src="/img/logo.png" alt="系统Logo" class="logo">
+        <span>IEIMS系统</span> <!-- 自定义系统名称，替换为你的项目名称 -->
+    </div>
+    <!-- 导航栏右侧：用户信息+退出按钮（模拟若依后台，样式统一） -->
+    <ul class="layui-nav layui-nav-right">
+        <li class="layui-nav-item">
+            <a href="javascript:;">
+                <img src="/img/userface.jpg" class="layui-nav-img">
+                测试用户
+            </a>
+            <dl class="layui-nav-child">
+                <dd><a href="javascript:;">个人中心</a></dd>
+                <dd><a href="javascript:;">修改密码</a></dd>
+            </dl>
+        </li>
+        <li class="layui-nav-item"><a href="javascript:;" class="logout">退出登录</a></li>
+    </ul>
+</div>
+
+<!-- 6. 原有核心内容：文字+图片（放在主体容器中，避开导航栏） -->
+<div class="main-container">
+    <div class="page-title">IEIMS系统首页测试图</div>
+    <img src="/img/login-background.jpg" class="page-img" alt="IEIMS测试图片">
+</div>
+
+<!-- 7. 引入若依自带JS（保证导航栏下拉菜单等功能正常） -->
+<script src="/plugins/layui/layui.js"></script>
+<script src="/js/ruoyi.js?v=4.6.0"></script>
+<script>
+    // 初始化layui导航栏（若依后台标配，保证下拉菜单正常展开）
+    layui.use('element', function(){
+        var element = layui.element;
+    });
+</script>
+</body>
+</html>
