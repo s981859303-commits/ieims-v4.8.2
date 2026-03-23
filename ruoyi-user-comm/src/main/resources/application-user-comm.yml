@@ -94,7 +94,7 @@ tdengine:
   # 原生驱动类名（适配 6030 端口）
   driver-class-name: com.taosdata.jdbc.TSDBDriver
   username: root
-  password: taosdata
+  password: Guet@90-=
   # Druid 连接池参数（覆盖公共模块默认值）
   druid:
     initial-size: 3        # 初始化连接数
