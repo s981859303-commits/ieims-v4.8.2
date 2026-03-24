@@ -101,6 +101,11 @@
             <version>${tdengine.driver.version}</version>
             <scope>compile</scope> <!-- 子模块显式引入 -->
         </dependency>
+
+        <dependency>
+            <groupId>com.taosdata.jdbc</groupId>
+            <artifactId>taos-jdbcdriver</artifactId>
+            <version>3.2.7</version> </dependency>
     </dependencies>
 
     <build>

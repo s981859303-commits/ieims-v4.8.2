@@ -79,28 +79,21 @@ public class TDengineRtcmStorageServiceImpl {
         // 卫星观测数据表
         String createSatObsStableSql = String.format(
                 "CREATE STABLE IF NOT EXISTS %s (" +
-                        "ts TIMESTAMP, sat_name VARCHAR(10), c1 VARCHAR(10), c2 VARCHAR(10), " +
+                        "ts TIMESTAMP, c1 VARCHAR(10), c2 VARCHAR(10), " +
                         "p1 DOUBLE, p2 DOUBLE, l1 DOUBLE, l2 DOUBLE, s1 DOUBLE" +
-                        ") TAGS (station_id VARCHAR(50))",
+                        ") TAGS (station_id VARCHAR(50), sat_name VARCHAR(10))",
                 STABLE_SAT_OBS
         );
         tdengineUtil.executeDDL(createSatObsStableSql);
 
-        // 创建子表
+        // 只预建 RTCM raw 的子表，卫星子表我们用自动建表语法
         String rtcmTable = "rtcm_" + sanitizeTableName(stationId);
-        String satObsTable = "satobs_" + sanitizeTableName(stationId);
-
         tdengineUtil.executeDDL(String.format(
                 "CREATE TABLE IF NOT EXISTS %s USING %s TAGS ('%s')",
                 rtcmTable, STABLE_RTCM_RAW, stationId
         ));
 
-        tdengineUtil.executeDDL(String.format(
-                "CREATE TABLE IF NOT EXISTS %s USING %s TAGS ('%s')",
-                satObsTable, STABLE_SAT_OBS, stationId
-        ));
-
-        logger.info("创建 RTCM 表: {}, {}", rtcmTable, satObsTable);
+        logger.info("创建/确认超级表完成: {}, {}", STABLE_RTCM_RAW, STABLE_SAT_OBS);
     }
 
     public boolean saveRtcmRawData(byte[] rtcmData) {
@@ -159,4 +152,57 @@ public class TDengineRtcmStorageServiceImpl {
         if (name == null) return "unknown";
         return name.replaceAll("[^a-zA-Z0-9_]", "_");
     }
+    // 新增一个内部类用于批量传递数据
+    public static class ObsData {
+        public String satName, c1, c2;
+        public Double p1, p2, l1, l2, s1;
+
+        public ObsData(String satName, String c1, String c2, Double p1, Double p2, Double l1, Double l2, Double s1) {
+            this.satName = satName; this.c1 = c1; this.c2 = c2;
+            this.p1 = p1; this.p2 = p2; this.l1 = l1; this.l2 = l2; this.s1 = s1;
+        }
+    }
+
+    /**
+     * 🔥 批量存储一个历元（1秒）内所有卫星的观测数据
+     */
+    public boolean saveSatelliteObsBatch(long timestamp, List<ObsData> obsList) {
+        if (!initialized || obsList == null || obsList.isEmpty()) return false;
+
+        try {
+            // 使用 StringBuilder 拼接批量插入的 SQL
+            // 语法格式: INSERT INTO 子表名 USING 超级表 TAGS(标签值) VALUES (数据) 子表名 USING ...
+            StringBuilder sqlBuilder = new StringBuilder("INSERT INTO ");
+            String sanitizedStationId = sanitizeTableName(stationId);
+
+            for (ObsData obs : obsList) {
+                // 子表命名规则：satobs_站号_卫星号 (如 satobs_8900_1_G01)
+                String tableName = "satobs_" + sanitizedStationId + "_" + obs.satName;
+
+                // 拼接自动建表及插入语句
+                sqlBuilder.append(String.format(
+                        "%s USING %s TAGS ('%s', '%s') VALUES (%d, '%s', '%s', %f, %f, %f, %f, %f) ",
+                        tableName, STABLE_SAT_OBS, stationId, obs.satName,
+                        timestamp,
+                        obs.c1 != null ? obs.c1 : "",
+                        obs.c2 != null ? obs.c2 : "",
+                        obs.p1 != null ? obs.p1 : 0.0,
+                        obs.p2 != null ? obs.p2 : 0.0,
+                        obs.l1 != null ? obs.l1 : 0.0,
+                        obs.l2 != null ? obs.l2 : 0.0,
+                        obs.s1 != null ? obs.s1 : 0.0
+                ));
+            }
+
+            // 执行这一条长 SQL，一次性写入几十个表的数据！
+            tdengineUtil.executeUpdate(sqlBuilder.toString());
+            logger.debug("✅ 成功批量存储 {} 颗卫星的观测数据", obsList.size());
+            return true;
+
+        } catch (Exception e) {
+            logger.error("❌ 批量存储卫星观测数据失败: {}", e.getMessage());
+            return false;
+        }
+    }
 }
+

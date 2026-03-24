@@ -31,7 +31,7 @@ public class GnssMqttService implements MqttCallbackExtended {
     private static final Logger logger = LoggerFactory.getLogger(GnssMqttService.class);
 
     @Autowired(required = false)
-    private MixedLogSplitter1 splitter;
+    private MixedLogSplitter splitter;
 
     private MqttClient client;
     private MqttConnectOptions connectOptions;

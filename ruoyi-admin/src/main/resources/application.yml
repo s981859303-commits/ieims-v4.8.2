@@ -94,13 +94,13 @@ gnss:
     # 是否启用 TDengine 直接写入
     enabled: true
     # 数据库名称
-    database: ieims
+    database: ieims # gnss_test_db
     # 表名前缀
     table-prefix: gnss_
     # 驱动类名
-    driver-class-name: com.taosdata.jdbc.TSDBDriver
+    driver-class-name: com.taosdata.jdbc.rs.RestfulDriver
     # 连接URL
-    url: jdbc:TAOS://127.0.0.1:6030/gnss_test_db
+    url: jdbc:TAOS-RS://127.0.0.1:6041/gnss_test_db
     # 用户名
     username: root
     # 密码
