@@ -5,7 +5,6 @@ import com.ruoyi.gnss.domain.NmeaRecord;
 /**
  * NMEA 数据存储接口
  * 作用：定义数据存储的标准。
- * 目前还没有数据库，我们先写个 Mock 实现；以后建好库了，写个 MySQL 实现替换即可。
  */
 public interface INmeaStorageService {
 

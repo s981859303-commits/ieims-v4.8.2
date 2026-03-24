@@ -46,12 +46,78 @@ user:
     # 密码错误{maxRetryCount}次锁定10分钟
     maxRetryCount: 5
 
-  # GNSS MQTT 配置
+  # =====================================================
+  # GNSS 模块配置文件
+  # =====================================================
+
 gnss:
+  # ==================== MQTT 配置 ====================
   mqtt:
+    # MQTT Broker 地址
     broker: tcp://broker.emqx.io:1883
+    # 订阅主题（接收 GNSS 数据）
     topic: /USR-G780s/update
-    clientIdPrefix: RuoYi_Client_
+    # 客户端 ID 前缀
+    client-id-prefix: RuoYi_Client_
+    # 用户名（可选）
+    username:
+    # 密码（可选）
+    password:
+    # 连接超时时间（秒）
+    connection-timeout: 30
+    # 心跳间隔（秒）
+    keep-alive-interval: 60
+    # 最大重连次数
+    max-reconnect-attempts: 10
+    # 重连延迟（毫秒）
+    reconnect-delay: 5000
+    # QoS 级别
+    qos: 0
+    #TDengine 数据推送主题
+    tdengine-topic: ieims/ieims_data_topic
+
+  # ==================== 解析器配置 ====================
+  parser:
+    # 缓冲区大小（字节）
+    buffer-size: 1048576
+    # 站点 ID
+    station-id: 8900_1
+    # NMEA 最大长度
+    max-nmea-length: 1000
+    # RTCM 最大长度
+    max-rtcm-length: 1200
+    # 打印间隔（毫秒）
+    print-interval-ms: 950
+
+  # ==================== TDengine 配置 ====================
+  tdengine:
+    # 是否启用 TDengine 直接写入
+    enabled: true
+    # 数据库名称
+    database: ieims
+    # 表名前缀
+    table-prefix: gnss_
+    # 驱动类名
+    driver-class-name: com.taosdata.jdbc.TSDBDriver
+    # 连接URL
+    url: jdbc:TAOS://127.0.0.1:6030/gnss_test_db
+    # 用户名
+    username: root
+    # 密码
+    password: Guet@90-=
+
+  # ==================== 录制服务配置 ====================
+  recorder:
+    # 是否启用录制
+    enabled: false
+    # 保存目录
+    save-dir: ./gnss-data
+    # 文件前缀
+    file-prefix: Record_
+    # 文件后缀
+    file-suffix: .rtcm
+    # 文件切分间隔（小时）
+    split-interval-hours: 1
 
 # Spring配置
 spring:

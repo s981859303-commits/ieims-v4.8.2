@@ -63,10 +63,6 @@ public class GnssSolution {
         return status > 0 && satelliteCount > 0;
     }
 
-    public boolean isHighPrecision() {
-        return status == 4 || status == 5;
-    }
-
     @Override
     public String toString() {
         return String.format("[时间:%s] 状态:%s(%d) | 经度:%.8f 纬度:%.8f 高程:%.3f | 卫星:%d | HDOP:%.2f",

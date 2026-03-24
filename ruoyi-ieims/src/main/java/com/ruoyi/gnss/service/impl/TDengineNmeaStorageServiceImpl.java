@@ -1,149 +1,111 @@
 package com.ruoyi.gnss.service.impl;
 
-import com.ruoyi.gnss.domain.GnssSolution;
-import com.ruoyi.gnss.service.IGnssStorageService;
+import com.ruoyi.gnss.domain.NmeaRecord;
+import com.ruoyi.gnss.service.INmeaStorageService;
 import com.ruoyi.user.comm.core.tdengine.TDengineUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
+import javax.annotation.PostConstruct;
+import javax.annotation.Resource;
+
 /**
- * NMEA 数据存储服务实现类（TDengine 版本）
- *
- * <p>
- * 将 NMEA 解算结果存储到 TDengine 数据库的 st_receiver_status 表中。
- * 数据来源：$GPGGA / $GNGGA 格式的 NMEA 语句
- * </p>
- *
- * <p>
- * 表结构说明：
- * - 超级表：st_receiver_status
- * - 字段：ts（时间戳）、lat（纬度）、lon（经度）、alt（海拔）、sat_used（卫星数）、hdop（精度因子）
- * - 标签：station_id（站点编号）
- * </p>
- *
- * @author GNSS Team
- * @date 2026-03-23
+ * TDengine NMEA 存储服务实现
  */
 @Service
-public class TDengineNmeaStorageServiceImpl implements IGnssStorageService {
+@ConditionalOnProperty(name = "gnss.tdengine.enabled", havingValue = "true", matchIfMissing = false)
+public class TDengineNmeaStorageServiceImpl implements INmeaStorageService {
 
-    private static final Logger log = LoggerFactory.getLogger(TDengineNmeaStorageServiceImpl.class);
+    private static final Logger logger = LoggerFactory.getLogger(TDengineNmeaStorageServiceImpl.class);
 
-    /** 数据库名称 */
-    private static final String DB_NAME = "gnss_test_db";
+    @Value("${gnss.tdengine.database:ieims}")
+    private String database;
 
-    /** 默认站点ID */
-    private static final String DEFAULT_STATION_ID = "8900_1";
+    @Value("${gnss.parser.stationId:8900_1}")
+    private String stationId;
 
-    @Autowired
+    @Value("${gnss.tdengine.tablePrefix:nmea_}")
+    private String tablePrefix;
+
+    private static final String STABLE_NAME = "st_nmea_raw";
+
+    @Resource
     private TDengineUtil tdengineUtil;
 
-    @Autowired
-    private GnssTDengineService gnssTDengineService;
+    private boolean initialized = false;
 
-    /**
-     * 保存 GNSS 解算结果到 TDengine
-     *
-     * @param solution GNSS 解算结果实体
-     */
+    @PostConstruct
+    public void init() {
+        try {
+            initTables();
+            initialized = true;
+            logger.info("TDengine NMEA 存储服务初始化成功");
+        } catch (Exception e) {
+            logger.error("TDengine NMEA 存储服务初始化失败: {}", e.getMessage());
+        }
+    }
+
+    private void initTables() {
+        tdengineUtil.executeDDL("USE " + database);
+
+        String createStableSql = String.format(
+                "CREATE STABLE IF NOT EXISTS %s (" +
+                        "ts TIMESTAMP, nmea_type VARCHAR(10), raw_content NCHAR(512)" +
+                        ") TAGS (station_id VARCHAR(50))",
+                STABLE_NAME
+        );
+        tdengineUtil.executeDDL(createStableSql);
+
+        String tableName = tablePrefix + sanitizeTableName(stationId);
+        String createTableSql = String.format(
+                "CREATE TABLE IF NOT EXISTS %s USING %s TAGS ('%s')",
+                tableName, STABLE_NAME, stationId
+        );
+        tdengineUtil.executeDDL(createTableSql);
+
+        logger.info("创建 NMEA 表: {}", tableName);
+    }
+
     @Override
-    public void saveSolution(GnssSolution solution) {
-        if (solution == null) {
-            log.warn("⚠️ GNSS 解算结果为空，跳过存储");
-            return;
-        }
+    public boolean saveNmeaData(NmeaRecord record) {
+        if (!initialized || record == null || record.getRawContent() == null) return false;
 
         try {
-            // 确保已切换到正确的数据库
-            gnssTDengineService.ensureDatabase();
+            String tableName = tablePrefix + sanitizeTableName(stationId);
+            long timestamp = record.getReceivedTime() != null ?
+                    record.getReceivedTime().getTime() : System.currentTimeMillis();
 
-            // 构建子表名称（格式：st_receiver_status_{station_id}）
-            String tableName = "st_receiver_status_" + DEFAULT_STATION_ID;
+            String nmeaType = extractNmeaType(record.getRawContent());
 
-            // 获取时间戳（毫秒）
-            long timestamp = solution.getTime() != null ? solution.getTime().getTime() : System.currentTimeMillis();
-
-            // 构建 INSERT SQL
             String insertSql = String.format(
-                    "INSERT INTO %s (ts, lat, lon, alt, sat_used, hdop) VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO %s (ts, nmea_type, raw_content) VALUES (?, ?, ?)",
                     tableName
             );
 
-            // 执行插入（hdop 暂时设为 0，因为 GnssSolution 中没有这个字段）
-            int rows = tdengineUtil.executeUpdate(
-                    insertSql,
-                    timestamp,
-                    solution.getLatitude(),
-                    solution.getLongitude(),
-                    solution.getAltitude(),
-                    solution.getSatelliteCount(),
-                    0.0  // hdop 默认值
-            );
-
-            log.debug("✅ NMEA 数据存储成功: 时间={}, 经度={}, 纬度={}, 高度={}, 卫星数={}, 影响行数={}",
-                    timestamp, solution.getLongitude(), solution.getLatitude(),
-                    solution.getAltitude(), solution.getSatelliteCount(), rows);
+            tdengineUtil.executeUpdate(insertSql, timestamp, nmeaType, record.getRawContent());
+            logger.debug("NMEA 数据已存储: {}", nmeaType);
+            return true;
 
         } catch (Exception e) {
-            log.error("❌ NMEA 数据存储失败: {}", e.getMessage(), e);
+            logger.error("存储 NMEA 数据失败: {}", e.getMessage());
+            return false;
         }
     }
 
-    /**
-     * 保存 NMEA 数据（扩展方法，支持更多字段）
-     *
-     * @param stationId 站点ID
-     * @param timestamp 时间戳（毫秒）
-     * @param lat 纬度
-     * @param lon 经度
-     * @param alt 海拔高度
-     * @param satUsed 参与定位的卫星数
-     * @param hdop 水平精度因子
-     */
-    public void saveReceiverStatus(String stationId, long timestamp,
-                                   double lat, double lon, double alt, int satUsed, double hdop) {
-        try {
-            // 确保已切换到正确的数据库
-            gnssTDengineService.ensureDatabase();
-
-            // 构建子表名称
-            String tableName = "st_receiver_status_" + stationId;
-
-            // 检查子表是否存在，不存在则创建
-            createTableIfNotExists(tableName, stationId);
-
-            // 构建 INSERT SQL
-            String insertSql = String.format(
-                    "INSERT INTO %s (ts, lat, lon, alt, sat_used, hdop) VALUES (?, ?, ?, ?, ?, ?)",
-                    tableName
-            );
-
-            // 执行插入
-            int rows = tdengineUtil.executeUpdate(insertSql, timestamp, lat, lon, alt, satUsed, hdop);
-
-            log.info("✅ 接收机状态存储成功: 站点={}, 时间={}, 经度={:.6f}, 纬度={:.6f}, 高度={:.2f}m, 卫星数={}, HDOP={:.2f}",
-                    stationId, timestamp, lon, lat, alt, satUsed, hdop);
-
-        } catch (Exception e) {
-            log.error("❌ 接收机状态存储失败: {}", e.getMessage(), e);
+    private String extractNmeaType(String nmea) {
+        if (nmea == null || nmea.length() < 6) return "UNKNOWN";
+        int start = nmea.startsWith("$") ? 3 : 0;
+        if (nmea.length() >= start + 3) {
+            return nmea.substring(start, start + 3);
         }
+        return "UNKNOWN";
     }
 
-    /**
-     * 检查并创建子表
-     */
-    private void createTableIfNotExists(String tableName, String stationId) {
-        try {
-            String createTableSql = String.format(
-                    "CREATE TABLE IF NOT EXISTS %s USING st_receiver_status TAGS ('%s')",
-                    tableName, stationId
-            );
-            tdengineUtil.executeDDL(createTableSql);
-        } catch (Exception e) {
-            // 表可能已存在，忽略错误
-            log.debug("子表 {} 可能已存在: {}", tableName, e.getMessage());
-        }
+    private String sanitizeTableName(String name) {
+        if (name == null) return "unknown";
+        return name.replaceAll("[^a-zA-Z0-9_]", "_");
     }
 }
