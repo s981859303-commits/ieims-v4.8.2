@@ -1,7 +1,5 @@
 package com.ruoyi.gnss.service;
 
-import cn.hutool.json.JSONArray;
-import com.ruoyi.common.json.JSONObject;
 import com.ruoyi.gnss.domain.GnssSolution;
 import com.ruoyi.gnss.domain.NmeaRecord;
 import com.ruoyi.gnss.service.impl.TDengineRtcmStorageServiceImpl;
@@ -17,30 +15,22 @@ import java.util.*;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * 混合日志解析器（配置修正版）
+ * 混合日志解析器
  *
  * 功能：
  * 1. 解析 NMEA 和 RTCM 混合数据流
  * 2. 调用 RtklibNative 解析 RTCM 观测数据
- * 3. 将数据写入 TDengine（直接写入或通过 MQTT）
- *
- * 配置修正：
- * 1. tdengine-topic 使用配置文件中的 ieims/ieims_data_topic
- * 2. 所有硬编码值改为配置注入
- * 3. 使用 SLF4J 日志框架
+ * 3. 将数据直接通过原生 SQL 写入 TDengine
  */
 @Service
 public class MixedLogSplitter {
 
     private static final Logger logger = LoggerFactory.getLogger(MixedLogSplitter.class);
 
-    // ==================== 配置参数（从配置文件注入）====================
+    // ==================== 配置参数 ====================
 
     @Value("${gnss.parser.bufferSize:1048576}")
     private int bufferSize;
-
-    @Value("${gnss.parser.stationId:8900_1}")
-    private String stationId;
 
     @Value("${gnss.parser.maxNmeaLength:1000}")
     private int maxNmeaLength;
@@ -51,20 +41,10 @@ public class MixedLogSplitter {
     @Value("${gnss.parser.printIntervalMs:950}")
     private long printIntervalMs;
 
-    @Value("${gnss.tdengine.enabled:false}")
-    private boolean tdengineEnabled;
-
-    // ⭐ TDengine MQTT 主题（从配置文件读取）
-    @Value("${gnss.mqtt.tdengineTopic:ieims/ieims_data_topic}")
-    private String tdengineMqttTopic;
-
-    // ==================== 依赖注入 ====================
+    // ==================== 依赖注入 (TDengine 存储服务) ====================
 
     @Autowired(required = false)
     private List<GnssDataListener> listeners = new ArrayList<>();
-
-    @Autowired(required = false)
-    private GnssMqttService mqttService;
 
     @Autowired(required = false)
     private IGnssStorageService gnssStorageService;
@@ -85,39 +65,27 @@ public class MixedLogSplitter {
     private final Map<Integer, SatData> satCache = new HashMap<>();
     private long lastPrintTime = System.currentTimeMillis();
 
-    // ==================== 统计计数器 ====================
-
-    private volatile long nmeaCount = 0;
-    private volatile long rtcmCount = 0;
-
     // ==================== 初始化 ====================
 
     @javax.annotation.PostConstruct
     public void init() {
         this.buffer = ByteBuffer.allocate(bufferSize);
-        logger.info("MixedLogSplitter 初始化完成");
-        logger.info("  - 缓冲区大小: {} 字节", bufferSize);
-        logger.info("  - 站点ID: {}", stationId);
-        logger.info("  - TDengine MQTT 主题: {}", tdengineMqttTopic);
-        logger.info("  - TDengine 直接写入: {}", tdengineEnabled);
+        logger.info("✅ MixedLogSplitter 初始化完成 ");
+        if (rtcmStorageService == null) {
+            logger.error("🚨 警告：rtcmStorageService 未注入！请检查 tdengine.enabled 配置！");
+        }
     }
 
     // ==================== 入口方法 ====================
 
-    /**
-     * 入口方法：接收原始字节流
-     */
     public void pushData(byte[] newBytes) {
         if (newBytes == null || newBytes.length == 0) return;
-
-        logger.debug("收到数据: {} 字节", newBytes.length);
 
         bufferLock.lock();
         try {
             if (buffer.remaining() < newBytes.length) {
                 buffer.compact();
                 if (buffer.remaining() < newBytes.length) {
-                    logger.warn("缓冲区空间不足，清空缓冲区");
                     buffer.clear();
                 }
             }
@@ -128,14 +96,14 @@ public class MixedLogSplitter {
             buffer.compact();
 
         } catch (Exception e) {
-            logger.error("数据解析异常: {}", e.getMessage());
+            logger.error("数据接收缓冲区异常: {}", e.getMessage());
             if (buffer != null) buffer.clear();
         } finally {
             bufferLock.unlock();
         }
     }
 
-    // ==================== 解析逻辑 ====================
+    // ==================== 拆包逻辑 ====================
 
     private void parseAndDispatch() {
         while (buffer.hasRemaining()) {
@@ -162,7 +130,6 @@ public class MixedLogSplitter {
         for (int i = buffer.position(); i < buffer.limit(); i++) {
             if (i - startPos > maxNmeaLength) {
                 buffer.position(i);
-                logger.warn("NMEA 语句过长，已跳过");
                 return true;
             }
 
@@ -190,12 +157,10 @@ public class MixedLogSplitter {
         if (length > maxRtcmLength || length == 0) {
             buffer.reset();
             buffer.get();
-            logger.debug("检测到假 RTCM 头，已跳过");
             return true;
         }
 
         int totalLen = length + 6;
-
         if (buffer.remaining() < totalLen - 1) return false;
 
         byte[] rtcmFrame = new byte[totalLen];
@@ -206,31 +171,22 @@ public class MixedLogSplitter {
         return true;
     }
 
-    // ==================== NMEA 处理 ====================
+    // ==================== NMEA 处理 (直接存 TDengine) ====================
 
     private void notifyNmea(String nmea) {
-        nmeaCount++;
-
-        // 分发给监听器
-        if (listeners != null) {
-            for (GnssDataListener listener : listeners) {
-                try {
-                    listener.onNmeaReceived(nmea);
-                } catch (Exception e) {
-                    logger.error("监听器处理 NMEA 异常: {}", e.getMessage());
-                }
-            }
-        }
-
-        // 存储 NMEA 数据
         if (nmeaStorageService != null) {
             NmeaRecord record = new NmeaRecord(new Date(), nmea);
             nmeaStorageService.saveNmeaData(record);
         }
 
-        // 解析 GGA 数据
         if (nmea.startsWith("$GPGGA") || nmea.startsWith("$GNGGA") || nmea.startsWith("$BDGGA")) {
             processGgaData(nmea);
+        }
+
+        if (listeners != null) {
+            for (GnssDataListener listener : listeners) {
+                try { listener.onNmeaReceived(nmea); } catch (Exception ignored) {}
+            }
         }
     }
 
@@ -246,100 +202,40 @@ public class MixedLogSplitter {
             double alt = parts[9].isEmpty() ? 0.0 : Double.parseDouble(parts[9]);
             int status = parts[6].isEmpty() ? 0 : Integer.parseInt(parts[6]);
 
-            // 创建解算结果
-            GnssSolution solution = new GnssSolution(
-                    new Date(), lat, lon, alt, status, satUsed
-            );
-            solution.setHdop(hdop);
-
-            // 存储到 TDengine
             if (gnssStorageService != null) {
+                GnssSolution solution = new GnssSolution(new Date(), lat, lon, alt, status, satUsed);
+                solution.setHdop(hdop);
                 gnssStorageService.saveSolution(solution);
             }
-
-            // 通过 MQTT 发布（使用配置的主题）
-            publishGgaToMqtt(lat, lon, alt, satUsed, hdop);
-
         } catch (Exception e) {
             logger.error("GGA 解析失败: {}", e.getMessage());
         }
     }
 
-    /**
-     * 发布 GGA 数据到 MQTT（使用配置的 tdengineMqttTopic）
-     */
-    private void publishGgaToMqtt(double lat, double lon, double alt, int satUsed, double hdop) {
-        if (mqttService == null || !mqttService.isConnected()) return;
-
-        JSONObject metric = new JSONObject();
-        metric.put("name", "st_receiver_status");
-        metric.put("timestamp", System.currentTimeMillis());
-
-        JSONObject tags = new JSONObject();
-        tags.put("station_id", stationId);
-        metric.put("tags", tags);
-
-        JSONObject fields = new JSONObject();
-        fields.put("lat", lat);
-        fields.put("lon", lon);
-        fields.put("alt", alt);
-        fields.put("sat_used", satUsed);
-        fields.put("hdop", hdop);
-        metric.put("fields", fields);
-
-        JSONArray metricsArray = new JSONArray();
-        metricsArray.add(metric);
-
-        JSONObject finalPayload = new JSONObject();
-        finalPayload.put("metrics", metricsArray);
-
-        // ⭐ 使用配置文件中的主题
-        mqttService.publish(tdengineMqttTopic, finalPayload.toString());
-        logger.debug("GGA 数据已发布到主题: {}", tdengineMqttTopic);
-    }
-
     private double nmeaToDecimal(String nmeaPos, String dir) {
         if (nmeaPos == null || nmeaPos.isEmpty()) return 0.0;
-
         int dotIndex = nmeaPos.indexOf(".");
         if (dotIndex < 2) return 0.0;
-
         try {
             int deg = Integer.parseInt(nmeaPos.substring(0, dotIndex - 2));
             double min = Double.parseDouble(nmeaPos.substring(dotIndex - 2));
             double decimal = deg + (min / 60.0);
-
-            if ("S".equalsIgnoreCase(dir) || "W".equalsIgnoreCase(dir)) {
-                decimal = -decimal;
-            }
-            return decimal;
-        } catch (NumberFormatException e) {
-            return 0.0;
-        }
+            return ("S".equalsIgnoreCase(dir) || "W".equalsIgnoreCase(dir)) ? -decimal : decimal;
+        } catch (Exception e) { return 0.0; }
     }
 
-    // ==================== RTCM 处理 ====================
+    // ==================== RTCM 处理 (直接存 TDengine) ====================
 
     private void notifyRtcm(byte[] data) {
-        rtcmCount++;
-        logger.debug("识别到 RTCM 帧，长度: {} 字节", data.length);
-
-        // 存储 RTCM 原始数据
         if (rtcmStorageService != null) {
             rtcmStorageService.saveRtcmRawData(data);
         }
 
-        // 调用 RtklibNative 解析
         decodeRtcmData(data);
 
-        // 分发给监听器
         if (listeners != null) {
             for (GnssDataListener listener : listeners) {
-                try {
-                    listener.onRtcmReceived(data);
-                } catch (Exception e) {
-                    logger.error("监听器处理 RTCM 异常: {}", e.getMessage());
-                }
+                try { listener.onRtcmReceived(data); } catch (Exception ignored) {}
             }
         }
     }
@@ -355,7 +251,7 @@ public class MixedLogSplitter {
                 updateSatCache(obsArray, count);
             }
         } catch (UnsatisfiedLinkError e) {
-            logger.error("找不到 rtklib_bridge.dll");
+            logger.error("找不到 rtklib_bridge.dll，请检查系统路径！");
         } catch (Exception e) {
             logger.error("RTCM 解码异常: {}", e.getMessage());
         }
@@ -364,7 +260,6 @@ public class MixedLogSplitter {
     private void updateSatCache(RtklibNative.JavaObs[] newObs, int count) {
         for (int i = 0; i < count; i++) {
             RtklibNative.JavaObs obs = newObs[i];
-
             if (obs.P[0] == 0.0) continue;
 
             SatData data = new SatData();
@@ -389,78 +284,40 @@ public class MixedLogSplitter {
 
         long now = System.currentTimeMillis();
         if (now - lastPrintTime > printIntervalMs) {
-            printAndPublishCache();
+            storeCacheToTDengine();
             lastPrintTime = now;
         }
     }
 
-    private void printAndPublishCache() {
+    /**
+     * 将 1 秒钟的缓存数据存入 TDengine (移除高频控制台打印)
+     */
+    private void storeCacheToTDengine() {
         if (satCache.isEmpty()) return;
 
-        logger.info("RTCM 数据 | 时间: {} | 卫星数: {}", new Date(), satCache.size());
+        if (rtcmStorageService == null) {
+            satCache.clear();
+            return;
+        }
 
         long currentTimestamp = System.currentTimeMillis();
+        int successCount = 0;
 
-        satCache.values().stream()
-                .sorted(Comparator.comparingInt(a -> a.sat))
-                .forEach(d -> {
-                    logger.debug("卫星 {}: P1={}", d.satName, d.p1);
+        for (SatData d : satCache.values()) {
+            try {
+                boolean isSaved = rtcmStorageService.saveSatelliteObs(
+                        currentTimestamp, d.satName,
+                        d.c1, d.c2, d.p1, d.p2, d.l1, d.l2, d.s1
+                );
+                if (isSaved) successCount++;
+            } catch (Exception e) {
+                logger.error("❌ 存入数据库失败 [卫星: {}]: {}", d.satName, e.getMessage());
+            }
+        }
 
-                    // 存储到 TDengine
-                    if (rtcmStorageService != null) {
-                        rtcmStorageService.saveSatelliteObs(
-                                currentTimestamp, d.satName,
-                                d.c1, d.c2, d.p1, d.p2, d.l1, d.l2, d.s1
-                        );
-                    }
-                });
-
-        // 通过 MQTT 发布（使用配置的主题）
-        publishSatObsToMqtt(currentTimestamp);
-
+        // 改为 debug 级别，生产环境中默认隐藏这行刷屏日志
+        logger.debug("本轮 TDengine 存储完成: 成功写入 {} 颗卫星的数据", successCount);
         satCache.clear();
-    }
-
-    /**
-     * 发布卫星观测数据到 MQTT（使用配置的 tdengineMqttTopic）
-     */
-    private void publishSatObsToMqtt(long timestamp) {
-        if (mqttService == null || !mqttService.isConnected()) return;
-
-        JSONArray metricsArray = new JSONArray();
-
-        satCache.values().forEach(d -> {
-            JSONObject metric = new JSONObject();
-            metric.put("name", "st_satellite_obs");
-            metric.put("timestamp", timestamp);
-
-            JSONObject tags = new JSONObject();
-            tags.put("station_id", stationId);
-            tags.put("sat_name", d.satName);
-            metric.put("tags", tags);
-
-            JSONObject fields = new JSONObject();
-            if (d.c1 != null) fields.put("c1", d.c1);
-            if (d.p1 != null) fields.put("p1", d.p1);
-            if (d.l1 != null) fields.put("l1", d.l1);
-            if (d.s1 != null) fields.put("s1", d.s1);
-            metric.put("fields", fields);
-
-            metricsArray.add(metric);
-        });
-
-        JSONObject finalPayload = new JSONObject();
-        finalPayload.put("metrics", metricsArray);
-
-        // ⭐ 使用配置文件中的主题
-        mqttService.publish(tdengineMqttTopic, finalPayload.toString());
-        logger.debug("卫星观测数据已发布到主题: {}", tdengineMqttTopic);
-    }
-
-    // ==================== 统计方法 ====================
-
-    public String getStatistics() {
-        return String.format("NMEA: %d, RTCM: %d", nmeaCount, rtcmCount);
     }
 
     // ==================== 内部类 ====================
