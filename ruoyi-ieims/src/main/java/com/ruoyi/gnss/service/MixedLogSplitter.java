@@ -16,7 +16,6 @@ import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * 混合日志解析器
- *
  * 功能：
  * 1. 解析 NMEA 和 RTCM 混合数据流
  * 2. 调用 RtklibNative 解析 RTCM 观测数据

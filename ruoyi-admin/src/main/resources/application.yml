@@ -112,14 +112,27 @@ gnss:
     enabled: false
     # 保存目录
     save-dir: ./gnss-data
-    # 文件前缀
-    file-prefix: Record_
+    # 站点ID
+    station-id: 8900_1
     # 文件后缀
-    file-suffix: .rtcm
-    # 文件切分间隔（小时）
-    split-interval-hours: 1
+    file-suffix: .bin
+    # 是否按日期创建子目录
+    date-subdirectory: true
+    # 时区
+    timezone: Asia/Shanghai
+    # 录制 RTCM
+    record-rtcm: true
+    # 录制 NMEA
+    record-nmea: true
+    # 中断检测阈值（毫秒）
+    interruption-threshold-ms: 5000
+    # 中断告警阈值（毫秒）
+    interruption-warning-ms: 30000
+    # 最小磁盘空间（MB）
+    min-disk-space-mb: 100
 
-# Spring配置
+
+  # Spring配置
 spring:
   # 导入子模块的配置文件（支持多个，用逗号分隔）
   config:
