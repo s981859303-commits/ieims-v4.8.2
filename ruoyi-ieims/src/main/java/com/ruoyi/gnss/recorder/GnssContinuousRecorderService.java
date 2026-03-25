@@ -42,7 +42,7 @@ public class GnssContinuousRecorderService implements GnssDataListener {
     // ==================== 依赖注入 ====================
 
     /**
-     * 配置属性 - 使用 setter 注入，避免构造函数注入问题
+     * 配置属性
      */
     private GnssRecorderProperties properties;
 

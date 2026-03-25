@@ -289,7 +289,7 @@ public class MixedLogSplitter {
     }
 
     /**
-     * 将 1 秒钟的缓存数据存入 TDengine (移除高频控制台打印)
+     * 将 1 秒钟的缓存数据存入 TDengine
      */
     private void storeCacheToTDengine() {
         if (satCache.isEmpty()) return;
