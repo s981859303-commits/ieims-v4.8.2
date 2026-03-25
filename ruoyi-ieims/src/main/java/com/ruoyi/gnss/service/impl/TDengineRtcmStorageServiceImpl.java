@@ -51,7 +51,7 @@ public class TDengineRtcmStorageServiceImpl {
     @Resource
     private TDengineUtil tdengineUtil;
 
-    /** 缓存的站点ID（避免重复调用 sanitizeTableName） */
+    /** 缓存的站点ID */
     private String cachedSanitizedStationId;
 
     /** 缓存的 RTCM 原始数据表名 */
@@ -62,7 +62,6 @@ public class TDengineRtcmStorageServiceImpl {
     @PostConstruct
     public void init() {
         try {
-            // 预先计算并缓存常用字符串
             this.cachedSanitizedStationId = sanitizeTableName(stationId);
             this.cachedRtcmTableName = "rtcm_" + cachedSanitizedStationId;
 
@@ -146,9 +145,6 @@ public class TDengineRtcmStorageServiceImpl {
         }
     }
 
-    /**
-     * 清理表名中的非法字符
-     */
     private String sanitizeTableName(String name) {
         if (name == null) {
             return "unknown";

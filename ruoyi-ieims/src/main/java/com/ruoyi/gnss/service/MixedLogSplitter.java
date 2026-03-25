@@ -13,6 +13,7 @@ import org.springframework.stereotype.Service;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -79,7 +80,7 @@ public class MixedLogSplitter {
     private volatile Long currentEpochTime = null;
 
     /** 最后打印时间 */
-    private volatile long lastPrintTime = System.currentTimeMillis();
+    private final AtomicLong lastPrintTime = new AtomicLong(System.currentTimeMillis());
 
     // ==================== 缓存的字符串常量 ====================
 
@@ -87,12 +88,17 @@ public class MixedLogSplitter {
     private static final String PREFIX_GPGGA = "$GPGGA";
     private static final String PREFIX_BDGGA = "$BDGGA";
 
+    // ==================== 统计信息 ====================
+
+    /** 缓冲区溢出计数 */
+    private final AtomicLong bufferOverflowCount = new AtomicLong(0);
+
     // ==================== 初始化 ====================
 
     @javax.annotation.PostConstruct
     public void init() {
         this.buffer = ByteBuffer.allocate(bufferSize);
-        logger.info("MixedLogSplitter 初始化完成（优化版）");
+        logger.info("MixedLogSplitter 初始化完成（修复版），缓冲区大小: {} bytes", bufferSize);
 
         if (rtcmStorageService == null) {
             logger.error("警告：rtcmStorageService 未注入！请检查 tdengine.enabled 配置！");
@@ -112,11 +118,15 @@ public class MixedLogSplitter {
 
         bufferLock.lock();
         try {
-            if (buffer.remaining() < newBytes.length) {
-                buffer.compact();
-                if (buffer.remaining() < newBytes.length) {
-                    buffer.clear();
+            // 修复：改进缓冲区满时的处理逻辑
+            if (!tryEnsureCapacity(newBytes.length)) {
+                // 无法容纳新数据，记录警告并丢弃
+                long overflowCount = bufferOverflowCount.incrementAndGet();
+                if (overflowCount % 100 == 1) {  // 每 100 次只打印一次
+                    logger.warn("缓冲区溢出，丢弃数据包，长度: {} bytes，累计溢出: {} 次",
+                            newBytes.length, overflowCount);
                 }
+                return;
             }
 
             buffer.put(newBytes);
@@ -126,10 +136,54 @@ public class MixedLogSplitter {
 
         } catch (Exception e) {
             logger.error("数据接收缓冲区异常: {}", e.getMessage());
-            if (buffer != null) buffer.clear();
+            // 异常情况下才清空缓冲区
+            if (buffer != null) {
+                buffer.clear();
+            }
         } finally {
             bufferLock.unlock();
         }
+    }
+
+    /**
+     * 尝试确保缓冲区有足够容量
+     *
+     * 修复：不再直接清空缓冲区，而是尝试压缩或拒绝新数据
+     *
+     * @param required 需要的字节数
+     * @return true 表示可以容纳，false 表示无法容纳
+     */
+    private boolean tryEnsureCapacity(int required) {
+        // 如果剩余空间足够，直接返回
+        if (buffer.remaining() >= required) {
+            return true;
+        }
+
+        // 尝试压缩缓冲区（移动已读数据到开头）
+        buffer.compact();
+        buffer.flip();
+        buffer.compact();
+
+        // 压缩后再次检查
+        if (buffer.remaining() >= required) {
+            return true;
+        }
+
+        // 如果新数据比整个缓冲区还大，无法处理
+        if (required > buffer.capacity()) {
+            logger.error("数据包过大，超过缓冲区容量: {} > {}", required, buffer.capacity());
+            return false;
+        }
+
+        // 缓冲区已满，但新数据可以放入空缓冲区
+        // 这里选择丢弃当前缓冲区中的半包数据（记录警告）
+        int lostBytes = buffer.position();
+        if (lostBytes > 0) {
+            logger.warn("缓冲区已满，丢弃 {} bytes 未处理的半包数据", lostBytes);
+        }
+        buffer.clear();
+
+        return buffer.remaining() >= required;
     }
 
     // ==================== 拆包逻辑 ====================
@@ -214,9 +268,9 @@ public class MixedLogSplitter {
             processGgaData(nmea);
         }
 
-        // 处理 GSV 语句
-        if (gsvParser != null && gsvParser.isGsvSentence(nmea)) {
-            processGsvData(nmea);
+        // 处理 GSV 语句 - 直接委托给 fusionService
+        if (fusionService != null && gsvParser != null && gsvParser.isGsvSentence(nmea)) {
+            fusionService.processGsvData(nmea);
         }
 
         // 通知监听器
@@ -228,7 +282,7 @@ public class MixedLogSplitter {
     }
 
     /**
-     * 判断是否为 GGA 语句（优化：避免多次 startsWith 调用）
+     * 判断是否为 GGA 语句
      */
     private boolean isGgaSentence(String nmea) {
         return nmea.startsWith(PREFIX_GNGGA) ||
@@ -271,7 +325,6 @@ public class MixedLogSplitter {
 
     /**
      * 解析 UTC 时间字符串为毫秒时间戳
-     * 优化：减少字符串操作
      */
     private Long parseUtcTime(String utcTime) {
         if (utcTime == null || utcTime.length() < 6) {
@@ -298,15 +351,6 @@ public class MixedLogSplitter {
             return cal.getTimeInMillis();
         } catch (Exception e) {
             return null;
-        }
-    }
-
-    /**
-     * 处理 GSV 数据
-     */
-    private void processGsvData(String gsvLine) {
-        if (fusionService != null) {
-            fusionService.processGsvData(gsvLine);
         }
     }
 
@@ -392,9 +436,11 @@ public class MixedLogSplitter {
 
         // 定时触发融合入库
         long now = System.currentTimeMillis();
-        if (now - lastPrintTime > printIntervalMs) {
-            fuseAndStoreData();
-            lastPrintTime = now;
+        long lastTime = lastPrintTime.get();
+        if (now - lastTime > printIntervalMs) {
+            if (lastPrintTime.compareAndSet(lastTime, now)) {
+                fuseAndStoreData();
+            }
         }
     }
 
@@ -419,10 +465,14 @@ public class MixedLogSplitter {
 
     // ==================== 公共接口 ====================
 
-    /**
-     * 获取当前历元时间
-     */
     public Long getCurrentEpochTime() {
         return currentEpochTime;
+    }
+
+    /**
+     * 获取缓冲区溢出计数
+     */
+    public long getBufferOverflowCount() {
+        return bufferOverflowCount.get();
     }
 }

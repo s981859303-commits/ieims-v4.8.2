@@ -39,7 +39,7 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
     /** 超级表名称 */
     private static final String STABLE_NAME = "st_sat_observation";
 
-    /** 空字符串常量，避免重复创建 */
+    /** 空字符串常量 */
     private static final String EMPTY_STR = "";
     private static final String NULL_STR = "NULL";
     private static final String FUSED_STR = "FUSED";
@@ -53,7 +53,7 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
     @Resource
     private TDengineUtil tdengineUtil;
 
-    /** 缓存的站点ID（避免重复调用 sanitizeTableName） */
+    /** 缓存的站点ID */
     private String cachedSanitizedStationId;
 
     /** 缓存的表名前缀 */
@@ -64,7 +64,6 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
     @PostConstruct
     public void init() {
         try {
-            // 预先计算并缓存常用字符串
             this.cachedSanitizedStationId = sanitizeTableName(stationId);
             this.cachedTablePrefix = "satobs_" + cachedSanitizedStationId + "_";
 
@@ -76,14 +75,9 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
         }
     }
 
-    /**
-     * 初始化超级表
-     */
     private void initTables() {
         tdengineUtil.executeDDL("USE " + database);
 
-        // 创建卫星观测数据超级表
-        // 注意：sat_no 作为普通列而非 TAG，避免子表数量暴涨
         String createStableSql = String.format(
                 "CREATE STABLE IF NOT EXISTS %s (" +
                         "ts TIMESTAMP, " +
@@ -123,8 +117,9 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
             long timestamp = observation.getTimestamp() != null ?
                     observation.getTimestamp() : System.currentTimeMillis();
 
-            String insertSql = buildSingleInsertSql(observation, timestamp);
-            tdengineUtil.executeUpdate(insertSql);
+            StringBuilder sb = new StringBuilder(250);
+            appendInsertSql(sb, observation, timestamp, stationId);
+            tdengineUtil.executeUpdate(sb.toString());
 
             return true;
 
@@ -177,18 +172,9 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
     }
 
     /**
-     * 构建单条插入 SQL
-     */
-    private String buildSingleInsertSql(SatObservation obs, long timestamp) {
-        StringBuilder sb = new StringBuilder(250);
-        appendInsertSql(sb, obs, timestamp, stationId);
-        return sb.toString();
-    }
-
-    /**
      * 追加插入 SQL 到 StringBuilder
      *
-     * 优化：使用链式 append，避免 String.format 的开销
+     * 修复：使用 String.valueOf() 替代 String.format(%f)，避免 Locale 陷阱
      */
     private void appendInsertSql(StringBuilder sb, SatObservation obs,
                                  long timestamp, String stationId) {
@@ -229,9 +215,6 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
                 .append("') ");
     }
 
-    /**
-     * 清理表名中的非法字符
-     */
     private String sanitizeTableName(String name) {
         if (name == null) {
             return "unknown";
@@ -241,6 +224,7 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
 
     /**
      * 格式化时间戳
+     * 安全：String.valueOf(long) 不受 Locale 影响
      */
     private String formatTimestamp(Long timestamp) {
         return timestamp != null ? String.valueOf(timestamp) : NULL_STR;
@@ -248,6 +232,7 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
 
     /**
      * 格式化 Double 值
+     * 安全：String.valueOf(double) 不受 Locale 影响
      */
     private String formatDouble(Double value) {
         return value != null ? String.valueOf(value) : NULL_STR;
