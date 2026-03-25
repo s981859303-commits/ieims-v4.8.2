@@ -2,6 +2,7 @@ package com.ruoyi.gnss.service;
 
 import com.ruoyi.gnss.domain.GnssSolution;
 import com.ruoyi.gnss.domain.NmeaRecord;
+import com.ruoyi.gnss.service.impl.SatelliteDataFusionService;
 import com.ruoyi.gnss.service.impl.TDengineRtcmStorageServiceImpl;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -19,7 +20,14 @@ import java.util.concurrent.locks.ReentrantLock;
  * 功能：
  * 1. 解析 NMEA 和 RTCM 混合数据流
  * 2. 调用 RtklibNative 解析 RTCM 观测数据
- * 3. 将数据直接通过原生 SQL 写入 TDengine
+ * 3. 解析 GSV 语句获取卫星仰角、方位角、信噪比
+ * 4. 融合 GSV 和 RTCM 数据
+ * 5. 将融合后的数据写入 TDengine
+ * 新增功能：
+ * - GPGSV/GBGSV 语句解析
+ * - 卫星编号统一转换
+ * - GSV + RTCM 数据融合
+ * - 卫星观测数据入库
  */
 @Service
 public class MixedLogSplitter {
@@ -40,7 +48,7 @@ public class MixedLogSplitter {
     @Value("${gnss.parser.printIntervalMs:950}")
     private long printIntervalMs;
 
-    // ==================== 依赖注入 (TDengine 存储服务) ====================
+    // ==================== 依赖注入 ====================
 
     @Autowired(required = false)
     private List<GnssDataListener> listeners = new ArrayList<>();
@@ -54,14 +62,25 @@ public class MixedLogSplitter {
     @Autowired(required = false)
     private TDengineRtcmStorageServiceImpl rtcmStorageService;
 
+    // ==================== 新增依赖注入 ====================
+
+    @Autowired(required = false)
+    private GsvParser gsvParser;
+
+    @Autowired(required = false)
+    private SatelliteDataFusionService fusionService;
+
     // ==================== 缓冲区和锁 ====================
 
     private ByteBuffer buffer;
     private final ReentrantLock bufferLock = new ReentrantLock();
 
-    // ==================== 卫星数据缓存 ====================
+    // ==================== 时间相关 ====================
 
-    private final Map<Integer, SatData> satCache = new HashMap<>();
+    /** 当前历元时间（从 GNGGA 解析） */
+    private volatile Long currentEpochTime = null;
+
+    /** 最后打印时间 */
     private long lastPrintTime = System.currentTimeMillis();
 
     // ==================== 初始化 ====================
@@ -69,9 +88,16 @@ public class MixedLogSplitter {
     @javax.annotation.PostConstruct
     public void init() {
         this.buffer = ByteBuffer.allocate(bufferSize);
-        logger.info("✅ MixedLogSplitter 初始化完成 ");
+        logger.info("✅ MixedLogSplitter 初始化完成（增强版，支持 GSV 解析和数据融合）");
+
         if (rtcmStorageService == null) {
             logger.error("🚨 警告：rtcmStorageService 未注入！请检查 tdengine.enabled 配置！");
+        }
+        if (gsvParser == null) {
+            logger.warn("⚠️ 警告：gsvParser 未注入，GSV 解析功能将不可用");
+        }
+        if (fusionService == null) {
+            logger.warn("⚠️ 警告：fusionService 未注入，数据融合功能将不可用");
         }
     }
 
@@ -170,18 +196,26 @@ public class MixedLogSplitter {
         return true;
     }
 
-    // ==================== NMEA 处理 (直接存 TDengine) ====================
+    // ==================== NMEA 处理（增强版） ====================
 
     private void notifyNmea(String nmea) {
+        // 存储原始 NMEA 数据
         if (nmeaStorageService != null) {
             NmeaRecord record = new NmeaRecord(new Date(), nmea);
             nmeaStorageService.saveNmeaData(record);
         }
 
-        if (nmea.startsWith("$GPGGA") || nmea.startsWith("$GNGGA") || nmea.startsWith("$BDGGA")) {
+        // 处理 GNGGA 语句（提取历元时间）
+        if (nmea.startsWith("$GNGGA") || nmea.startsWith("$GPGGA") || nmea.startsWith("$BDGGA")) {
             processGgaData(nmea);
         }
 
+        // ==================== 新增：处理 GSV 语句 ====================
+        if (gsvParser != null && gsvParser.isGsvSentence(nmea)) {
+            processGsvData(nmea);
+        }
+
+        // 通知监听器
         if (listeners != null) {
             for (GnssDataListener listener : listeners) {
                 try { listener.onNmeaReceived(nmea); } catch (Exception ignored) {}
@@ -189,10 +223,21 @@ public class MixedLogSplitter {
         }
     }
 
+    /**
+     * 处理 GGA 数据（提取历元时间和定位信息）
+     */
     private void processGgaData(String ggaLine) {
         try {
             String[] parts = ggaLine.split(",", -1);
             if (parts.length < 10 || parts[2].isEmpty() || parts[4].isEmpty()) return;
+
+            // 提取 UTC 时间作为历元时间
+            if (parts.length > 1 && !parts[1].isEmpty()) {
+                currentEpochTime = parseUtcTime(parts[1]);
+                if (fusionService != null) {
+                    fusionService.setEpochTime(currentEpochTime);
+                }
+            }
 
             double lat = nmeaToDecimal(parts[2], parts[3]);
             double lon = nmeaToDecimal(parts[4], parts[5]);
@@ -211,6 +256,48 @@ public class MixedLogSplitter {
         }
     }
 
+    /**
+     * 解析 UTC 时间字符串为毫秒时间戳
+     * 格式：HHMMSS.ss
+     */
+    private Long parseUtcTime(String utcTime) {
+        if (utcTime == null || utcTime.length() < 6) {
+            return null;
+        }
+
+        try {
+            Calendar cal = Calendar.getInstance();
+            int hours = Integer.parseInt(utcTime.substring(0, 2));
+            int minutes = Integer.parseInt(utcTime.substring(2, 4));
+            int seconds = Integer.parseInt(utcTime.substring(4, 6));
+            int millis = 0;
+
+            if (utcTime.length() > 7 && utcTime.contains(".")) {
+                String decimal = utcTime.split("\\.")[1];
+                millis = (int) (Double.parseDouble("0." + decimal) * 1000);
+            }
+
+            cal.set(Calendar.HOUR_OF_DAY, hours);
+            cal.set(Calendar.MINUTE, minutes);
+            cal.set(Calendar.SECOND, seconds);
+            cal.set(Calendar.MILLISECOND, millis);
+
+            return cal.getTimeInMillis();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
+     * 处理 GSV 数据（新增方法）
+     */
+    private void processGsvData(String gsvLine) {
+        if (fusionService != null) {
+            fusionService.processGsvData(gsvLine);
+            logger.debug("GSV 数据已处理: {}", gsvLine.substring(0, Math.min(30, gsvLine.length())));
+        }
+    }
+
     private double nmeaToDecimal(String nmeaPos, String dir) {
         if (nmeaPos == null || nmeaPos.isEmpty()) return 0.0;
         int dotIndex = nmeaPos.indexOf(".");
@@ -223,15 +310,18 @@ public class MixedLogSplitter {
         } catch (Exception e) { return 0.0; }
     }
 
-    // ==================== RTCM 处理 (直接存 TDengine) ====================
+    // ==================== RTCM 处理（增强版） ====================
 
     private void notifyRtcm(byte[] data) {
+        // 存储原始 RTCM 数据
         if (rtcmStorageService != null) {
             rtcmStorageService.saveRtcmRawData(data);
         }
 
+        // 解算 RTCM 数据
         decodeRtcmData(data);
 
+        // 通知监听器
         if (listeners != null) {
             for (GnssDataListener listener : listeners) {
                 try { listener.onRtcmReceived(data); } catch (Exception ignored) {}
@@ -247,7 +337,7 @@ public class MixedLogSplitter {
             int count = RtklibNative.INSTANCE.parse_rtcm_frame(rtcmData, rtcmData.length, obsRef, 64);
 
             if (count > 0) {
-                updateSatCache(obsArray, count);
+                updateSatCache(obsArray, count, rtcmData);
             }
         } catch (UnsatisfiedLinkError e) {
             logger.error("找不到 rtklib_bridge.dll，请检查系统路径！");
@@ -256,74 +346,82 @@ public class MixedLogSplitter {
         }
     }
 
-    private void updateSatCache(RtklibNative.JavaObs[] newObs, int count) {
+    /**
+     * 更新卫星缓存（增强版，支持数据融合）
+     */
+    private void updateSatCache(RtklibNative.JavaObs[] newObs, int count, byte[] rtcmData) {
+        // 获取 RTCM 消息类型
+        int rtcmMessageType = getRtcmMessageType(rtcmData);
+
         for (int i = 0; i < count; i++) {
             RtklibNative.JavaObs obs = newObs[i];
             if (obs.P[0] == 0.0) continue;
 
-            SatData data = new SatData();
-            data.sat = obs.sat;
-            data.satName = new String(obs.id).trim();
+            String satName = new String(obs.id).trim();
 
+            // 转换为统一卫星编号格式
+            String satNo = SatNoConverter.fromRtcmSatId(satName, rtcmMessageType);
+
+            // 提取观测数据
+            Double p1 = obs.P[0] > 0 ? obs.P[0] : null;
+            Double l1 = obs.L[0] != 0.0 ? obs.L[0] : null;
+            Double p2 = obs.P[1] > 0 ? obs.P[1] : null;
+            Double l2 = obs.L[1] != 0.0 ? obs.L[1] : null;
+            Double snr = obs.snr[0] > 0 ? obs.snr[0] * 4.0 : null;
+
+            String c1 = null, c2 = null;
             if (obs.code != null && obs.code.length >= 8) {
-                data.c1 = new String(obs.code, 0, 8).trim();
+                c1 = new String(obs.code, 0, 8).trim();
             }
             if (obs.code != null && obs.code.length >= 16) {
-                data.c2 = new String(obs.code, 8, 8).trim();
+                c2 = new String(obs.code, 8, 8).trim();
             }
 
-            data.p1 = obs.P[0];
-            data.l1 = obs.L[0];
-            data.p2 = (obs.P[1] != 0.0) ? obs.P[1] : null;
-            data.l2 = (obs.L[1] != 0.0) ? obs.L[1] : null;
-            data.s1 = (obs.snr[0] > 0) ? obs.snr[0] * 4.0 : 0;
-
-            satCache.put(data.sat, data);
+            // 发送到融合服务
+            if (fusionService != null) {
+                fusionService.processRtcmData(satNo, rtcmMessageType, p1, p2, l1, l2, snr, c1, c2);
+            }
         }
 
+        // 定时触发融合入库
         long now = System.currentTimeMillis();
         if (now - lastPrintTime > printIntervalMs) {
-            storeCacheToTDengine();
+            fuseAndStoreData();
             lastPrintTime = now;
         }
     }
 
     /**
-     * 将 1 秒钟的缓存数据存入 TDengine
+     * 获取 RTCM 消息类型
      */
-    private void storeCacheToTDengine() {
-        if (satCache.isEmpty()) return;
-
-        if (rtcmStorageService == null) {
-            satCache.clear();
-            return;
+    private int getRtcmMessageType(byte[] rtcmData) {
+        if (rtcmData == null || rtcmData.length < 6) {
+            return 0;
         }
-
-        long currentTimestamp = System.currentTimeMillis();
-        int successCount = 0;
-
-        for (SatData d : satCache.values()) {
-            try {
-                boolean isSaved = rtcmStorageService.saveSatelliteObs(
-                        currentTimestamp, d.satName,
-                        d.c1, d.c2, d.p1, d.p2, d.l1, d.l2, d.s1
-                );
-                if (isSaved) successCount++;
-            } catch (Exception e) {
-                logger.error("❌ 存入数据库失败 [卫星: {}]: {}", d.satName, e.getMessage());
-            }
-        }
-
-        // 改为 debug 级别，生产环境中默认隐藏这行刷屏日志
-        logger.debug("本轮 TDengine 存储完成: 成功写入 {} 颗卫星的数据", successCount);
-        satCache.clear();
+        // RTCM 消息类型在帧的第3-4字节（去掉前导0xD3后）
+        // 格式：0xD3 + 2字节长度 + 12位消息类型
+        int type = ((rtcmData[3] & 0xFF) << 4) | ((rtcmData[4] & 0xF0) >> 4);
+        return type;
     }
 
-    // ==================== 内部类 ====================
+    /**
+     * 执行数据融合和入库
+     */
+    private void fuseAndStoreData() {
+        if (fusionService != null) {
+            int count = fusionService.fuseAndStore();
+            if (count > 0) {
+                logger.debug("本轮数据融合入库完成: {} 颗卫星", count);
+            }
+        }
+    }
 
-    private static class SatData {
-        int sat;
-        Double p1, p2, l1, l2, s1;
-        String satName, c1, c2;
+    // ==================== 公共接口 ====================
+
+    /**
+     * 获取当前历元时间
+     */
+    public Long getCurrentEpochTime() {
+        return currentEpochTime;
     }
 }
