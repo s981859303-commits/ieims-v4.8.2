@@ -39,6 +39,11 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
     /** 超级表名称 */
     private static final String STABLE_NAME = "st_sat_observation";
 
+    /** 空字符串常量，避免重复创建 */
+    private static final String EMPTY_STR = "";
+    private static final String NULL_STR = "NULL";
+    private static final String FUSED_STR = "FUSED";
+
     @Value("${gnss.tdengine.database:ieims}")
     private String database;
 
@@ -48,11 +53,21 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
     @Resource
     private TDengineUtil tdengineUtil;
 
-    private boolean initialized = false;
+    /** 缓存的站点ID（避免重复调用 sanitizeTableName） */
+    private String cachedSanitizedStationId;
+
+    /** 缓存的表名前缀 */
+    private String cachedTablePrefix;
+
+    private volatile boolean initialized = false;
 
     @PostConstruct
     public void init() {
         try {
+            // 预先计算并缓存常用字符串
+            this.cachedSanitizedStationId = sanitizeTableName(stationId);
+            this.cachedTablePrefix = "satobs_" + cachedSanitizedStationId + "_";
+
             initTables();
             initialized = true;
             logger.info("TDengine 卫星观测数据存储服务初始化成功");
@@ -65,27 +80,27 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
      * 初始化超级表
      */
     private void initTables() {
-        // 切换到目标数据库
         tdengineUtil.executeDDL("USE " + database);
 
         // 创建卫星观测数据超级表
+        // 注意：sat_no 作为普通列而非 TAG，避免子表数量暴涨
         String createStableSql = String.format(
                 "CREATE STABLE IF NOT EXISTS %s (" +
-                        "ts TIMESTAMP, " +                    // 系统时间戳
-                        "epoch_time TIMESTAMP, " +            // 历元时间
-                        "sat_no VARCHAR(8), " +               // 卫星编号（G01/C01）
-                        "sat_system VARCHAR(4), " +           // 卫星系统（GPS/BDS）
-                        "elevation DOUBLE, " +                // 仰角（度）
-                        "azimuth DOUBLE, " +                  // 方位角（度）
-                        "snr DOUBLE, " +                      // 信噪比（dB-Hz）
-                        "pseudorange_p1 DOUBLE, " +           // 伪距P1（米）
-                        "phase_l1 DOUBLE, " +                 // 相位L1（周）
-                        "pseudorange_p2 DOUBLE, " +           // 伪距P2（米）
-                        "phase_p2 DOUBLE, " +                 // 相位P2（周）
-                        "c1 VARCHAR(10), " +                  // 信号代码1
-                        "c2 VARCHAR(10), " +                  // 信号代码2
-                        "data_source VARCHAR(20) " +          // 数据来源
-                        ") TAGS (station_id VARCHAR(50))",    // 站点ID标签
+                        "ts TIMESTAMP, " +
+                        "epoch_time TIMESTAMP, " +
+                        "sat_no VARCHAR(8), " +
+                        "sat_system VARCHAR(4), " +
+                        "elevation DOUBLE, " +
+                        "azimuth DOUBLE, " +
+                        "snr DOUBLE, " +
+                        "pseudorange_p1 DOUBLE, " +
+                        "phase_l1 DOUBLE, " +
+                        "pseudorange_p2 DOUBLE, " +
+                        "phase_p2 DOUBLE, " +
+                        "c1 VARCHAR(10), " +
+                        "c2 VARCHAR(10), " +
+                        "data_source VARCHAR(20) " +
+                        ") TAGS (station_id VARCHAR(50))",
                 STABLE_NAME
         );
 
@@ -105,15 +120,12 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
         }
 
         try {
-            String tableName = getTableName(observation.getSatNo());
             long timestamp = observation.getTimestamp() != null ?
                     observation.getTimestamp() : System.currentTimeMillis();
 
-            // 使用自动建表语法
-            String insertSql = buildInsertSql(tableName, timestamp, observation);
+            String insertSql = buildSingleInsertSql(observation, timestamp);
             tdengineUtil.executeUpdate(insertSql);
 
-            logger.debug("卫星观测数据已存储: {}", observation.getSatNo());
             return true;
 
         } catch (Exception e) {
@@ -135,27 +147,25 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
         }
 
         try {
-            StringBuilder sqlBuilder = new StringBuilder("INSERT INTO ");
-            String sanitizedStationId = sanitizeTableName(stationId);
+            // 预估 SQL 长度：每条约 200 字节
+            int estimatedLength = 20 + observations.size() * 200;
+            StringBuilder sqlBuilder = new StringBuilder(estimatedLength);
+            sqlBuilder.append("INSERT INTO ");
+
             int successCount = 0;
+            long timestamp = System.currentTimeMillis();
 
             for (SatObservation obs : observations) {
                 if (obs == null || obs.getSatNo() == null) {
                     continue;
                 }
 
-                String tableName = "satobs_" + sanitizedStationId + "_" + obs.getSatNo();
-                long timestamp = obs.getTimestamp() != null ?
-                        obs.getTimestamp() : System.currentTimeMillis();
-
-                // 拼接自动建表及插入语句
-                sqlBuilder.append(buildAutoCreateInsertSql(tableName, timestamp, obs, stationId));
+                appendInsertSql(sqlBuilder, obs, timestamp, stationId);
                 successCount++;
             }
 
             if (successCount > 0) {
                 tdengineUtil.executeUpdate(sqlBuilder.toString());
-                logger.debug("批量存储卫星观测数据成功: {} 条", successCount);
             }
 
             return successCount;
@@ -167,64 +177,56 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
     }
 
     /**
-     * 构建自动建表插入语句
+     * 构建单条插入 SQL
      */
-    private String buildAutoCreateInsertSql(String tableName, long timestamp,
-                                            SatObservation obs, String stationId) {
-
-        return String.format(
-                "%s USING %s TAGS ('%s') VALUES (%d, %s, '%s', '%s', %s, %s, %s, %s, %s, %s, %s, '%s', '%s', '%s') ",
-                tableName,
-                STABLE_NAME,
-                stationId,
-                timestamp,
-                formatTimestamp(obs.getEpochTime()),
-                obs.getSatNo(),
-                obs.getSatSystem() != null ? obs.getSatSystem() : "",
-                formatDouble(obs.getElevation()),
-                formatDouble(obs.getAzimuth()),
-                formatDouble(obs.getSnr()),
-                formatDouble(obs.getPseudorangeP1()),
-                formatDouble(obs.getPhaseL1()),
-                formatDouble(obs.getPseudorangeP2()),
-                formatDouble(obs.getPhaseP2()),
-                obs.getC1() != null ? obs.getC1() : "",
-                obs.getC2() != null ? obs.getC2() : "",
-                obs.getDataSource() != null ? obs.getDataSource() : "FUSED"
-        );
+    private String buildSingleInsertSql(SatObservation obs, long timestamp) {
+        StringBuilder sb = new StringBuilder(250);
+        appendInsertSql(sb, obs, timestamp, stationId);
+        return sb.toString();
     }
 
     /**
-     * 构建普通插入语句
+     * 追加插入 SQL 到 StringBuilder
+     *
+     * 优化：使用链式 append，避免 String.format 的开销
      */
-    private String buildInsertSql(String tableName, long timestamp, SatObservation obs) {
-        return String.format(
-                "INSERT INTO %s USING %s TAGS ('%s') VALUES (%d, %s, '%s', '%s', %s, %s, %s, %s, %s, %s, %s, '%s', '%s', '%s')",
-                tableName,
-                STABLE_NAME,
-                stationId,
-                timestamp,
-                formatTimestamp(obs.getEpochTime()),
-                obs.getSatNo(),
-                obs.getSatSystem() != null ? obs.getSatSystem() : "",
-                formatDouble(obs.getElevation()),
-                formatDouble(obs.getAzimuth()),
-                formatDouble(obs.getSnr()),
-                formatDouble(obs.getPseudorangeP1()),
-                formatDouble(obs.getPhaseL1()),
-                formatDouble(obs.getPseudorangeP2()),
-                formatDouble(obs.getPhaseP2()),
-                obs.getC1() != null ? obs.getC1() : "",
-                obs.getC2() != null ? obs.getC2() : "",
-                obs.getDataSource() != null ? obs.getDataSource() : "FUSED"
-        );
-    }
-
-    /**
-     * 获取子表名称
-     */
-    private String getTableName(String satNo) {
-        return "satobs_" + sanitizeTableName(stationId) + "_" + satNo;
+    private void appendInsertSql(StringBuilder sb, SatObservation obs,
+                                 long timestamp, String stationId) {
+        sb.append(cachedTablePrefix)
+                .append(obs.getSatNo())
+                .append(" USING ")
+                .append(STABLE_NAME)
+                .append(" TAGS ('")
+                .append(stationId)
+                .append("') VALUES (")
+                .append(timestamp)
+                .append(", ")
+                .append(formatTimestamp(obs.getEpochTime()))
+                .append(", '")
+                .append(obs.getSatNo())
+                .append("', '")
+                .append(obs.getSatSystem() != null ? obs.getSatSystem() : EMPTY_STR)
+                .append("', ")
+                .append(formatDouble(obs.getElevation()))
+                .append(", ")
+                .append(formatDouble(obs.getAzimuth()))
+                .append(", ")
+                .append(formatDouble(obs.getSnr()))
+                .append(", ")
+                .append(formatDouble(obs.getPseudorangeP1()))
+                .append(", ")
+                .append(formatDouble(obs.getPhaseL1()))
+                .append(", ")
+                .append(formatDouble(obs.getPseudorangeP2()))
+                .append(", ")
+                .append(formatDouble(obs.getPhaseP2()))
+                .append(", '")
+                .append(obs.getC1() != null ? obs.getC1() : EMPTY_STR)
+                .append("', '")
+                .append(obs.getC2() != null ? obs.getC2() : EMPTY_STR)
+                .append("', '")
+                .append(obs.getDataSource() != null ? obs.getDataSource() : FUSED_STR)
+                .append("') ");
     }
 
     /**
@@ -241,19 +243,13 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
      * 格式化时间戳
      */
     private String formatTimestamp(Long timestamp) {
-        if (timestamp == null) {
-            return "NULL";
-        }
-        return String.valueOf(timestamp);
+        return timestamp != null ? String.valueOf(timestamp) : NULL_STR;
     }
 
     /**
      * 格式化 Double 值
      */
     private String formatDouble(Double value) {
-        if (value == null) {
-            return "NULL";
-        }
-        return String.valueOf(value);
+        return value != null ? String.valueOf(value) : NULL_STR;
     }
 }

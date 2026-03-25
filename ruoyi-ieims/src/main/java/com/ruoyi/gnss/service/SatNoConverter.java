@@ -32,19 +32,19 @@ public class SatNoConverter {
     public static final String SYS_GAL = "GAL";
 
     /** GPS 卫星编号前缀 */
-    public static final String PREFIX_GPS = "G";
+    public static final char PREFIX_GPS = 'G';
 
     /** 北斗卫星编号前缀 */
-    public static final String PREFIX_BDS = "C";
+    public static final char PREFIX_BDS = 'C';
 
     /** GLONASS 卫星编号前缀 */
-    public static final String PREFIX_GLO = "R";
+    public static final char PREFIX_GLO = 'R';
 
     /** Galileo 卫星编号前缀 */
-    public static final String PREFIX_GAL = "E";
+    public static final char PREFIX_GAL = 'E';
 
     /** 未知系统前缀 */
-    public static final String PREFIX_UNKNOWN = "X";
+    public static final char PREFIX_UNKNOWN = 'X';
 
     /**
      * 将卫星系统和PRN号转换为统一格式
@@ -55,51 +55,55 @@ public class SatNoConverter {
      */
     public static String convert(String satSystem, int prn) {
         if (satSystem == null || prn <= 0) {
-            return String.format("%s%02d", PREFIX_UNKNOWN, prn);
+            return formatSatNo(PREFIX_UNKNOWN, prn);
         }
 
+        char prefix;
         switch (satSystem.toUpperCase()) {
             case SYS_GPS:
-                return String.format("%s%02d", PREFIX_GPS, prn);
+                prefix = PREFIX_GPS;
+                break;
             case SYS_BDS:
-                return String.format("%s%02d", PREFIX_BDS, prn);
+                prefix = PREFIX_BDS;
+                break;
             case SYS_GLO:
-                return String.format("%s%02d", PREFIX_GLO, prn);
+                prefix = PREFIX_GLO;
+                break;
             case SYS_GAL:
-                return String.format("%s%02d", PREFIX_GAL, prn);
+                prefix = PREFIX_GAL;
+                break;
             default:
-                return String.format("%s%02d", PREFIX_UNKNOWN, prn);
+                prefix = PREFIX_UNKNOWN;
+                break;
         }
+        return formatSatNo(prefix, prn);
     }
 
     /**
      * 从 RTCM 解算的卫星ID字符串解析并转换为统一格式
      *
-     * RTCM 1074/1127 中的卫星ID格式可能为：
-     * - 纯数字：如 "1"、"2"、"3"
-     * - 带前缀：如 "G01"、"C01"
+     * 优化：移除正则表达式，改用字符判断
      *
      * @param satId 卫星ID字符串
      * @param rtcmMessageType RTCM消息类型（1074=GPS, 1127=BeiDou）
      * @return 统一格式的卫星编号
      */
     public static String fromRtcmSatId(String satId, int rtcmMessageType) {
-        if (satId == null || satId.trim().isEmpty()) {
+        if (satId == null || satId.isEmpty()) {
             return null;
         }
 
         satId = satId.trim();
+        int len = satId.length();
 
-        // 如果已经是标准格式（如 G01、C01），直接返回
-        if (satId.matches("^[GCRE][0-9]{2}$")) {
+        // 检查是否已经是标准格式（如 G01、C01）
+        if (len == 3 && isSatPrefix(satId.charAt(0)) && isDigit(satId.charAt(1)) && isDigit(satId.charAt(2))) {
             return satId;
         }
 
-        // 如果是带前缀但格式不完全标准（如 G1、C1），补零
-        if (satId.matches("^[GCRE][0-9]{1,2}$")) {
-            char prefix = satId.charAt(0);
-            int prn = Integer.parseInt(satId.substring(1));
-            return String.format("%c%02d", prefix, prn);
+        // 检查是否是带前缀但格式不完全标准（如 G1、C1），补零
+        if (len == 2 && isSatPrefix(satId.charAt(0)) && isDigit(satId.charAt(1))) {
+            return formatSatNo(satId.charAt(0), satId.charAt(1) - '0');
         }
 
         // 纯数字格式，根据 RTCM 消息类型确定卫星系统
@@ -107,7 +111,6 @@ public class SatNoConverter {
             int prn = Integer.parseInt(satId);
             return fromRtcmMessageType(rtcmMessageType, prn);
         } catch (NumberFormatException e) {
-            // 解析失败，返回原始值
             return satId;
         }
     }
@@ -120,23 +123,25 @@ public class SatNoConverter {
      * @return 统一格式的卫星编号
      */
     public static String fromRtcmMessageType(int rtcmMessageType, int prn) {
-        // RTCM 消息类型与卫星系统的对应关系
-        // 1074 = GPS MSM4
-        // 1127 = BeiDou MSM4
-        // 1084 = GLONASS MSM4
-        // 1094 = Galileo MSM4
+        char prefix;
         switch (rtcmMessageType) {
             case 1074:
-                return String.format("%s%02d", PREFIX_GPS, prn);
+                prefix = PREFIX_GPS;
+                break;
             case 1127:
-                return String.format("%s%02d", PREFIX_BDS, prn);
+                prefix = PREFIX_BDS;
+                break;
             case 1084:
-                return String.format("%s%02d", PREFIX_GLO, prn);
+                prefix = PREFIX_GLO;
+                break;
             case 1094:
-                return String.format("%s%02d", PREFIX_GAL, prn);
+                prefix = PREFIX_GAL;
+                break;
             default:
-                return String.format("%s%02d", PREFIX_UNKNOWN, prn);
+                prefix = PREFIX_UNKNOWN;
+                break;
         }
+        return formatSatNo(prefix, prn);
     }
 
     /**
@@ -150,15 +155,14 @@ public class SatNoConverter {
             return "UNKNOWN";
         }
 
-        char prefix = satNo.charAt(0);
-        switch (prefix) {
-            case 'G':
+        switch (satNo.charAt(0)) {
+            case PREFIX_GPS:
                 return SYS_GPS;
-            case 'C':
+            case PREFIX_BDS:
                 return SYS_BDS;
-            case 'R':
+            case PREFIX_GLO:
                 return SYS_GLO;
-            case 'E':
+            case PREFIX_GAL:
                 return SYS_GAL;
             default:
                 return "UNKNOWN";
@@ -187,27 +191,53 @@ public class SatNoConverter {
      * 判断是否为 GPS 卫星
      */
     public static boolean isGps(String satNo) {
-        return satNo != null && satNo.startsWith(PREFIX_GPS);
+        return satNo != null && !satNo.isEmpty() && satNo.charAt(0) == PREFIX_GPS;
     }
 
     /**
      * 判断是否为北斗卫星
      */
     public static boolean isBds(String satNo) {
-        return satNo != null && satNo.startsWith(PREFIX_BDS);
+        return satNo != null && !satNo.isEmpty() && satNo.charAt(0) == PREFIX_BDS;
     }
 
     /**
      * 验证卫星编号格式是否正确
      *
+     * 优化：移除正则表达式，改用字符判断
+     *
      * @param satNo 卫星编号
      * @return true 表示格式正确
      */
     public static boolean isValid(String satNo) {
-        if (satNo == null) {
+        if (satNo == null || satNo.length() != 3) {
             return false;
         }
-        // 格式：一个字母 + 两位数字
-        return satNo.matches("^[GCRE][0-9]{2}$");
+        return isSatPrefix(satNo.charAt(0))
+                && isDigit(satNo.charAt(1))
+                && isDigit(satNo.charAt(2));
+    }
+
+    // ==================== 私有辅助方法 ====================
+
+    /**
+     * 格式化卫星编号
+     */
+    private static String formatSatNo(char prefix, int prn) {
+        return String.format("%c%02d", prefix, prn);
+    }
+
+    /**
+     * 判断字符是否为卫星前缀
+     */
+    private static boolean isSatPrefix(char c) {
+        return c == PREFIX_GPS || c == PREFIX_BDS || c == PREFIX_GLO || c == PREFIX_GAL;
+    }
+
+    /**
+     * 判断字符是否为数字
+     */
+    private static boolean isDigit(char c) {
+        return c >= '0' && c <= '9';
     }
 }

@@ -14,6 +14,7 @@ import org.springframework.stereotype.Service;
 import javax.annotation.PostConstruct;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 卫星观测数据融合服务
@@ -38,16 +39,16 @@ public class SatelliteDataFusionService {
     private static final Logger logger = LoggerFactory.getLogger(SatelliteDataFusionService.class);
 
     /** GSV 数据缓存（键：卫星编号，值：卫星数据） */
-    private final Map<String, GsvSatelliteData> gsvCache = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, GsvSatelliteData> gsvCache = new ConcurrentHashMap<>(64);
 
     /** RTCM 观测数据缓存（键：卫星编号，值：观测数据） */
-    private final Map<String, RtcmObsData> rtcmCache = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, RtcmObsData> rtcmCache = new ConcurrentHashMap<>(64);
 
     /** 当前历元时间（毫秒） */
     private volatile Long currentEpochTime = null;
 
     /** 最后融合时间 */
-    private volatile long lastFusionTime = 0;
+    private final AtomicLong lastFusionTime = new AtomicLong(0);
 
     @Value("${gnss.fusion.intervalMs:1000}")
     private long fusionIntervalMs;
@@ -83,8 +84,6 @@ public class SatelliteDataFusionService {
                     gsvCache.put(data.getSatNo(), data);
                 }
             }
-            logger.debug("GSV 数据已缓存: {} 颗卫星", satList.size());
-
         } catch (Exception e) {
             logger.error("处理 GSV 数据异常: {}", e.getMessage());
         }
@@ -106,13 +105,11 @@ public class SatelliteDataFusionService {
     public void processRtcmData(String satId, int rtcmMessageType,
                                 Double p1, Double p2, Double l1, Double l2,
                                 Double snr, String c1, String c2) {
-
         if (satId == null) {
             return;
         }
 
         try {
-            // 转换卫星编号为统一格式
             String satNo = SatNoConverter.fromRtcmSatId(satId, rtcmMessageType);
 
             RtcmObsData data = new RtcmObsData();
@@ -128,7 +125,6 @@ public class SatelliteDataFusionService {
             data.setTimestamp(System.currentTimeMillis());
 
             rtcmCache.put(satNo, data);
-            logger.debug("RTCM 数据已缓存: {}", satNo);
 
         } catch (Exception e) {
             logger.error("处理 RTCM 数据异常: {}", e.getMessage());
@@ -168,31 +164,30 @@ public class SatelliteDataFusionService {
 
         long now = System.currentTimeMillis();
 
-        // 检查是否到达融合间隔
-        if (now - lastFusionTime < fusionIntervalMs) {
+        // 使用 CAS 操作避免并发问题
+        long lastTime = lastFusionTime.get();
+        if (now - lastTime < fusionIntervalMs) {
             return 0;
         }
 
-        lastFusionTime = now;
+        // CAS 更新最后融合时间
+        if (!lastFusionTime.compareAndSet(lastTime, now)) {
+            return 0;
+        }
 
         try {
-            // 执行数据融合
             List<SatObservation> observations = fuseData(now);
 
             if (observations.isEmpty()) {
-                logger.debug("无数据需要融合");
                 return 0;
             }
 
-            // 批量入库
             int savedCount;
             if (stationId != null) {
                 savedCount = storageService.saveSatObservationBatch(stationId, observations);
             } else {
                 savedCount = storageService.saveSatObservationBatch(observations);
             }
-
-            logger.debug("数据融合入库完成: {} 条记录", savedCount);
 
             // 清空缓存
             clearCache();
@@ -212,10 +207,12 @@ public class SatelliteDataFusionService {
      * @return 融合后的卫星观测数据列表
      */
     private List<SatObservation> fuseData(long timestamp) {
-        List<SatObservation> result = new ArrayList<>();
+        // 预分配容量，避免扩容
+        int estimatedSize = Math.max(gsvCache.size(), rtcmCache.size());
+        List<SatObservation> result = new ArrayList<>(estimatedSize);
 
-        // 收集所有卫星编号
-        Set<String> allSatNos = new HashSet<>();
+        // 使用 Set 收集所有卫星编号
+        Set<String> allSatNos = new HashSet<>(estimatedSize);
         allSatNos.addAll(gsvCache.keySet());
         allSatNos.addAll(rtcmCache.keySet());
 
@@ -236,7 +233,6 @@ public class SatelliteDataFusionService {
         GsvSatelliteData gsvData = gsvCache.get(satNo);
         RtcmObsData rtcmData = rtcmCache.get(satNo);
 
-        // 如果两种数据都没有，跳过
         if (gsvData == null && rtcmData == null) {
             return null;
         }
@@ -251,7 +247,6 @@ public class SatelliteDataFusionService {
         if (gsvData != null) {
             obs.setElevation(gsvData.getElevation());
             obs.setAzimuth(gsvData.getAzimuth());
-            // GSV 信噪比先设置，后面可能被 RTCM 覆盖
             obs.setSnr(gsvData.getSnr());
         }
 
@@ -271,8 +266,7 @@ public class SatelliteDataFusionService {
         }
 
         // 设置数据来源标识
-        String dataSource = determineDataSource(gsvData, rtcmData);
-        obs.setDataSource(dataSource);
+        obs.setDataSource(determineDataSource(gsvData, rtcmData));
 
         return obs;
     }
@@ -328,7 +322,6 @@ public class SatelliteDataFusionService {
         private String c2;
         private Long timestamp;
 
-        // Getter/Setter
         public String getSatNo() { return satNo; }
         public void setSatNo(String satNo) { this.satNo = satNo; }
         public String getSatSystem() { return satSystem; }

@@ -46,14 +46,18 @@ public class GsvParser {
     /** GNGSV 语句前缀（多系统混合） */
     private static final String PREFIX_GNGSV = "$GNGSV";
 
+    /** 预期的每条 GSV 语句最大卫星数 */
+    private static final int MAX_SATS_PER_SENTENCE = 4;
+
     /**
      * 解析 GSV 语句
      *
-     * @param gsvLine GSV 语句（如 $GPGSV,3,1,12,01,45,123,42,...*hh）
+     * @param gsvLine GSV 语句
      * @return 卫星数据列表，解析失败返回空列表
      */
     public List<GsvSatelliteData> parseGsv(String gsvLine) {
-        List<GsvSatelliteData> result = new ArrayList<>();
+        // 预分配容量
+        List<GsvSatelliteData> result = new ArrayList<>(MAX_SATS_PER_SENTENCE);
 
         if (gsvLine == null || !gsvLine.startsWith("$")) {
             return result;
@@ -61,11 +65,11 @@ public class GsvParser {
 
         try {
             // 移除校验和（*hh）
-            String line = gsvLine.split("\\*")[0];
+            int starIndex = gsvLine.indexOf('*');
+            String line = starIndex > 0 ? gsvLine.substring(0, starIndex) : gsvLine;
             String[] parts = line.split(",", -1);
 
             if (parts.length < 4) {
-                logger.debug("GSV 语句字段不足: {}", gsvLine);
                 return result;
             }
 
@@ -78,12 +82,10 @@ public class GsvParser {
             // 确定卫星系统
             String satSystem = determineSatSystem(sentenceType);
             if (satSystem == null) {
-                logger.debug("未知的 GSV 语句类型: {}", sentenceType);
                 return result;
             }
 
             // 解析卫星数据（每颗卫星占4个字段：PRN、仰角、方位角、信噪比）
-            // 从索引4开始，每4个字段为一颗卫星的数据
             for (int i = 4; i + 3 < parts.length; i += 4) {
                 GsvSatelliteData data = parseSatelliteData(parts, i, satSystem,
                         totalSentences, sentenceNumber, totalSats);
@@ -93,7 +95,7 @@ public class GsvParser {
             }
 
         } catch (Exception e) {
-            logger.error("解析 GSV 语句异常: {}, 错误: {}", gsvLine, e.getMessage());
+            logger.error("解析 GSV 语句异常: {}", e.getMessage());
         }
 
         return result;
@@ -103,7 +105,8 @@ public class GsvParser {
      * 解析单颗卫星数据
      */
     private GsvSatelliteData parseSatelliteData(String[] parts, int startIndex,
-                                                String satSystem, int totalSentences, int sentenceNumber, int totalSats) {
+                                                String satSystem, int totalSentences,
+                                                int sentenceNumber, int totalSats) {
 
         GsvSatelliteData data = new GsvSatelliteData();
         data.setSatSystem(satSystem);
@@ -121,54 +124,19 @@ public class GsvParser {
         try {
             int prn = Integer.parseInt(prnStr);
             data.setPrn(prn);
-            // 转换为统一卫星编号格式
             data.setSatNo(SatNoConverter.convert(satSystem, prn));
         } catch (NumberFormatException e) {
-            logger.debug("无效的 PRN 号: {}", prnStr);
             return null;
         }
 
         // 仰角（度）
-        String elevStr = parts[startIndex + 1];
-        if (elevStr != null && !elevStr.isEmpty()) {
-            try {
-                double elevation = Double.parseDouble(elevStr);
-                // 仰角范围校验：0-90度
-                if (elevation >= 0 && elevation <= 90) {
-                    data.setElevation(elevation);
-                }
-            } catch (NumberFormatException e) {
-                // 仰角解析失败，保持 null
-            }
-        }
+        data.setElevation(parseDoubleInRange(parts[startIndex + 1], 0, 90));
 
         // 方位角（度）
-        String azimStr = parts[startIndex + 2];
-        if (azimStr != null && !azimStr.isEmpty()) {
-            try {
-                double azimuth = Double.parseDouble(azimStr);
-                // 方位角范围校验：0-360度
-                if (azimuth >= 0 && azimuth < 360) {
-                    data.setAzimuth(azimuth);
-                }
-            } catch (NumberFormatException e) {
-                // 方位角解析失败，保持 null
-            }
-        }
+        data.setAzimuth(parseDoubleInRange(parts[startIndex + 2], 0, 360));
 
         // 信噪比（dB-Hz）
-        String snrStr = parts[startIndex + 3];
-        if (snrStr != null && !snrStr.isEmpty()) {
-            try {
-                double snr = Double.parseDouble(snrStr);
-                // 信噪比范围校验：通常 0-99 dB-Hz
-                if (snr >= 0 && snr <= 99) {
-                    data.setSnr(snr);
-                }
-            } catch (NumberFormatException e) {
-                // 信噪比解析失败，保持 null
-            }
-        }
+        data.setSnr(parseDoubleInRange(parts[startIndex + 3], 0, 99));
 
         return data;
     }
@@ -181,14 +149,12 @@ public class GsvParser {
             return null;
         }
 
-        String type = sentenceType.toUpperCase();
-        if (type.contains("GPGSV") || type.equals("$GPGSV")) {
+        if (sentenceType.startsWith(PREFIX_GPGSV)) {
             return SatNoConverter.SYS_GPS;
-        } else if (type.contains("GBGSV") || type.equals("$GBGSV")) {
+        } else if (sentenceType.startsWith(PREFIX_GBGSV)) {
             return SatNoConverter.SYS_BDS;
-        } else if (type.contains("GNGSV")) {
+        } else if (sentenceType.startsWith(PREFIX_GNGSV)) {
             // GNGSV 是多系统混合，需要根据卫星PRN号判断
-            // 暂时返回 null，由调用方处理
             return null;
         }
 
@@ -210,16 +176,33 @@ public class GsvParser {
     }
 
     /**
+     * 解析 Double 并检查范围
+     */
+    private Double parseDoubleInRange(String value, double min, double max) {
+        if (value == null || value.isEmpty()) {
+            return null;
+        }
+        try {
+            double d = Double.parseDouble(value);
+            if (d >= min && d <= max) {
+                return d;
+            }
+            return null;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /**
      * 判断是否为 GSV 语句
      */
     public boolean isGsvSentence(String nmea) {
         if (nmea == null) {
             return false;
         }
-        String upper = nmea.toUpperCase();
-        return upper.startsWith(PREFIX_GPGSV) ||
-                upper.startsWith(PREFIX_GBGSV) ||
-                upper.startsWith(PREFIX_GNGSV);
+        return nmea.startsWith(PREFIX_GPGSV) ||
+                nmea.startsWith(PREFIX_GBGSV) ||
+                nmea.startsWith(PREFIX_GNGSV);
     }
 
     /**
@@ -231,12 +214,11 @@ public class GsvParser {
         if (nmea == null) {
             return null;
         }
-        String upper = nmea.toUpperCase();
-        if (upper.startsWith(PREFIX_GPGSV)) {
+        if (nmea.startsWith(PREFIX_GPGSV)) {
             return "GPS";
-        } else if (upper.startsWith(PREFIX_GBGSV)) {
+        } else if (nmea.startsWith(PREFIX_GBGSV)) {
             return "BDS";
-        } else if (upper.startsWith(PREFIX_GNGSV)) {
+        } else if (nmea.startsWith(PREFIX_GNGSV)) {
             return "MIXED";
         }
         return null;

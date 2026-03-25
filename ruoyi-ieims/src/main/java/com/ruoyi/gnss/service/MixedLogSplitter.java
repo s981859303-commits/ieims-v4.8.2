@@ -62,8 +62,6 @@ public class MixedLogSplitter {
     @Autowired(required = false)
     private TDengineRtcmStorageServiceImpl rtcmStorageService;
 
-    // ==================== 新增依赖注入 ====================
-
     @Autowired(required = false)
     private GsvParser gsvParser;
 
@@ -81,23 +79,29 @@ public class MixedLogSplitter {
     private volatile Long currentEpochTime = null;
 
     /** 最后打印时间 */
-    private long lastPrintTime = System.currentTimeMillis();
+    private volatile long lastPrintTime = System.currentTimeMillis();
+
+    // ==================== 缓存的字符串常量 ====================
+
+    private static final String PREFIX_GNGGA = "$GNGGA";
+    private static final String PREFIX_GPGGA = "$GPGGA";
+    private static final String PREFIX_BDGGA = "$BDGGA";
 
     // ==================== 初始化 ====================
 
     @javax.annotation.PostConstruct
     public void init() {
         this.buffer = ByteBuffer.allocate(bufferSize);
-        logger.info("✅ MixedLogSplitter 初始化完成（增强版，支持 GSV 解析和数据融合）");
+        logger.info("MixedLogSplitter 初始化完成（优化版）");
 
         if (rtcmStorageService == null) {
-            logger.error("🚨 警告：rtcmStorageService 未注入！请检查 tdengine.enabled 配置！");
+            logger.error("警告：rtcmStorageService 未注入！请检查 tdengine.enabled 配置！");
         }
         if (gsvParser == null) {
-            logger.warn("⚠️ 警告：gsvParser 未注入，GSV 解析功能将不可用");
+            logger.warn("警告：gsvParser 未注入，GSV 解析功能将不可用");
         }
         if (fusionService == null) {
-            logger.warn("⚠️ 警告：fusionService 未注入，数据融合功能将不可用");
+            logger.warn("警告：fusionService 未注入，数据融合功能将不可用");
         }
     }
 
@@ -196,7 +200,7 @@ public class MixedLogSplitter {
         return true;
     }
 
-    // ==================== NMEA 处理（增强版） ====================
+    // ==================== NMEA 处理 ====================
 
     private void notifyNmea(String nmea) {
         // 存储原始 NMEA 数据
@@ -205,12 +209,12 @@ public class MixedLogSplitter {
             nmeaStorageService.saveNmeaData(record);
         }
 
-        // 处理 GNGGA 语句（提取历元时间）
-        if (nmea.startsWith("$GNGGA") || nmea.startsWith("$GPGGA") || nmea.startsWith("$BDGGA")) {
+        // 处理 GGA 语句（提取历元时间）
+        if (isGgaSentence(nmea)) {
             processGgaData(nmea);
         }
 
-        // ==================== 新增：处理 GSV 语句 ====================
+        // 处理 GSV 语句
         if (gsvParser != null && gsvParser.isGsvSentence(nmea)) {
             processGsvData(nmea);
         }
@@ -221,6 +225,15 @@ public class MixedLogSplitter {
                 try { listener.onNmeaReceived(nmea); } catch (Exception ignored) {}
             }
         }
+    }
+
+    /**
+     * 判断是否为 GGA 语句（优化：避免多次 startsWith 调用）
+     */
+    private boolean isGgaSentence(String nmea) {
+        return nmea.startsWith(PREFIX_GNGGA) ||
+                nmea.startsWith(PREFIX_GPGGA) ||
+                nmea.startsWith(PREFIX_BDGGA);
     }
 
     /**
@@ -258,7 +271,7 @@ public class MixedLogSplitter {
 
     /**
      * 解析 UTC 时间字符串为毫秒时间戳
-     * 格式：HHMMSS.ss
+     * 优化：减少字符串操作
      */
     private Long parseUtcTime(String utcTime) {
         if (utcTime == null || utcTime.length() < 6) {
@@ -267,13 +280,13 @@ public class MixedLogSplitter {
 
         try {
             Calendar cal = Calendar.getInstance();
-            int hours = Integer.parseInt(utcTime.substring(0, 2));
-            int minutes = Integer.parseInt(utcTime.substring(2, 4));
-            int seconds = Integer.parseInt(utcTime.substring(4, 6));
+            int hours = (utcTime.charAt(0) - '0') * 10 + (utcTime.charAt(1) - '0');
+            int minutes = (utcTime.charAt(2) - '0') * 10 + (utcTime.charAt(3) - '0');
+            int seconds = (utcTime.charAt(4) - '0') * 10 + (utcTime.charAt(5) - '0');
             int millis = 0;
 
-            if (utcTime.length() > 7 && utcTime.contains(".")) {
-                String decimal = utcTime.split("\\.")[1];
+            if (utcTime.length() > 7 && utcTime.charAt(6) == '.') {
+                String decimal = utcTime.substring(7);
                 millis = (int) (Double.parseDouble("0." + decimal) * 1000);
             }
 
@@ -289,12 +302,11 @@ public class MixedLogSplitter {
     }
 
     /**
-     * 处理 GSV 数据（新增方法）
+     * 处理 GSV 数据
      */
     private void processGsvData(String gsvLine) {
         if (fusionService != null) {
             fusionService.processGsvData(gsvLine);
-            logger.debug("GSV 数据已处理: {}", gsvLine.substring(0, Math.min(30, gsvLine.length())));
         }
     }
 
@@ -310,7 +322,7 @@ public class MixedLogSplitter {
         } catch (Exception e) { return 0.0; }
     }
 
-    // ==================== RTCM 处理（增强版） ====================
+    // ==================== RTCM 处理 ====================
 
     private void notifyRtcm(byte[] data) {
         // 存储原始 RTCM 数据
@@ -347,10 +359,9 @@ public class MixedLogSplitter {
     }
 
     /**
-     * 更新卫星缓存（增强版，支持数据融合）
+     * 更新卫星缓存
      */
     private void updateSatCache(RtklibNative.JavaObs[] newObs, int count, byte[] rtcmData) {
-        // 获取 RTCM 消息类型
         int rtcmMessageType = getRtcmMessageType(rtcmData);
 
         for (int i = 0; i < count; i++) {
@@ -358,11 +369,8 @@ public class MixedLogSplitter {
             if (obs.P[0] == 0.0) continue;
 
             String satName = new String(obs.id).trim();
-
-            // 转换为统一卫星编号格式
             String satNo = SatNoConverter.fromRtcmSatId(satName, rtcmMessageType);
 
-            // 提取观测数据
             Double p1 = obs.P[0] > 0 ? obs.P[0] : null;
             Double l1 = obs.L[0] != 0.0 ? obs.L[0] : null;
             Double p2 = obs.P[1] > 0 ? obs.P[1] : null;
@@ -377,7 +385,6 @@ public class MixedLogSplitter {
                 c2 = new String(obs.code, 8, 8).trim();
             }
 
-            // 发送到融合服务
             if (fusionService != null) {
                 fusionService.processRtcmData(satNo, rtcmMessageType, p1, p2, l1, l2, snr, c1, c2);
             }
@@ -398,10 +405,7 @@ public class MixedLogSplitter {
         if (rtcmData == null || rtcmData.length < 6) {
             return 0;
         }
-        // RTCM 消息类型在帧的第3-4字节（去掉前导0xD3后）
-        // 格式：0xD3 + 2字节长度 + 12位消息类型
-        int type = ((rtcmData[3] & 0xFF) << 4) | ((rtcmData[4] & 0xF0) >> 4);
-        return type;
+        return ((rtcmData[3] & 0xFF) << 4) | ((rtcmData[4] & 0xF0) >> 4);
     }
 
     /**
@@ -409,10 +413,7 @@ public class MixedLogSplitter {
      */
     private void fuseAndStoreData() {
         if (fusionService != null) {
-            int count = fusionService.fuseAndStore();
-            if (count > 0) {
-                logger.debug("本轮数据融合入库完成: {} 颗卫星", count);
-            }
+            fusionService.fuseAndStore();
         }
     }
 
