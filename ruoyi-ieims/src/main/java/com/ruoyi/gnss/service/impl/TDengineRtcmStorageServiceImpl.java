@@ -1,9 +1,9 @@
 package com.ruoyi.gnss.service.impl;
 
+import com.ruoyi.gnss.service.IRtcmStorageService;
 import com.ruoyi.user.comm.core.tdengine.TDengineUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
@@ -11,10 +11,22 @@ import org.springframework.stereotype.Service;
 import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
 import java.util.Base64;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
+/**
+ * RTCM 数据存储服务实现类（TDengine 版本）- 优化版
+ *
+ * <p>
+ * 优化内容：
+ * 1. 实现 IRtcmStorageService 接口，遵循依赖倒置原则
+ * 2. 删除了 st_satellite_obs 建表逻辑（由 TDengineSatObservationServiceImpl 统一管理）
+ * 3. 缓存常用字符串，避免重复计算
+ * 4. 增加统计信息
+ * </p>
+ *
+ * @author GNSS Team
+ * @date 2026-03-25
+ */
 /**
  * RTCM 观测数据存储服务实现类（TDengine 版本）
  *
@@ -35,7 +47,7 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 @Service
 @ConditionalOnProperty(name = "gnss.tdengine.enabled", havingValue = "true", matchIfMissing = false)
-public class TDengineRtcmStorageServiceImpl {
+public class TDengineRtcmStorageServiceImpl implements IRtcmStorageService {
 
     private static final Logger logger = LoggerFactory.getLogger(TDengineRtcmStorageServiceImpl.class);
 
@@ -57,7 +69,17 @@ public class TDengineRtcmStorageServiceImpl {
     /** 缓存的 RTCM 原始数据表名 */
     private String cachedRtcmTableName;
 
+    /** 统计信息 */
+    private final AtomicLong savedCount = new AtomicLong(0);
+    private final AtomicLong failedCount = new AtomicLong(0);
+
     private volatile boolean initialized = false;
+
+    @PostConstruct
+    @Override
+    public boolean isInitialized() {
+        return initialized;
+    }
 
     @PostConstruct
     public void init() {
@@ -99,9 +121,7 @@ public class TDengineRtcmStorageServiceImpl {
         logger.info("创建/确认超级表完成: {}", STABLE_RTCM_RAW);
     }
 
-    /**
-     * 保存 RTCM 原始数据
-     */
+    @Override
     public boolean saveRtcmRawData(byte[] rtcmData) {
         if (!initialized || rtcmData == null || rtcmData.length == 0) {
             return false;
@@ -117,32 +137,20 @@ public class TDengineRtcmStorageServiceImpl {
             );
 
             tdengineUtil.executeUpdate(insertSql, timestamp, rtcmData.length, base64Data);
+            savedCount.incrementAndGet();
             return true;
 
         } catch (Exception e) {
+            failedCount.incrementAndGet();
             logger.error("存储 RTCM 原始数据失败: {}", e.getMessage());
             return false;
         }
     }
 
-    /**
-     * 内部类：观测数据
-     */
-    public static class ObsData {
-        public String satName, c1, c2;
-        public Double p1, p2, l1, l2, s1;
-
-        public ObsData(String satName, String c1, String c2,
-                       Double p1, Double p2, Double l1, Double l2, Double s1) {
-            this.satName = satName;
-            this.c1 = c1;
-            this.c2 = c2;
-            this.p1 = p1;
-            this.p2 = p2;
-            this.l1 = l1;
-            this.l2 = l2;
-            this.s1 = s1;
-        }
+    @Override
+    public String getStatistics() {
+        return String.format("RTCM[saved=%d, failed=%d]",
+                savedCount.get(), failedCount.get());
     }
 
     private String sanitizeTableName(String name) {

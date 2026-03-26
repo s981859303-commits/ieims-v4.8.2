@@ -3,7 +3,6 @@ package com.ruoyi.gnss.service;
 import com.ruoyi.gnss.domain.GnssSolution;
 import com.ruoyi.gnss.domain.NmeaRecord;
 import com.ruoyi.gnss.service.impl.SatelliteDataFusionService;
-import com.ruoyi.gnss.service.impl.TDengineRtcmStorageServiceImpl;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -49,7 +48,7 @@ public class MixedLogSplitter {
     @Value("${gnss.parser.printIntervalMs:950}")
     private long printIntervalMs;
 
-    // ==================== 依赖注入 ====================
+    // ==================== 依赖注入（面向接口） ====================
 
     @Autowired(required = false)
     private List<GnssDataListener> listeners = new ArrayList<>();
@@ -58,16 +57,19 @@ public class MixedLogSplitter {
     private IGnssStorageService gnssStorageService;
 
     @Autowired(required = false)
-    private INmeaStorageService nmeaStorageService;
+    private INmeaStorageService nmeaStorageService;  // 使用原有接口
 
     @Autowired(required = false)
-    private TDengineRtcmStorageServiceImpl rtcmStorageService;
+    private IRtcmStorageService rtcmStorageService;  // 新增接口
 
     @Autowired(required = false)
     private GsvParser gsvParser;
 
     @Autowired(required = false)
     private SatelliteDataFusionService fusionService;
+
+    @Autowired(required = false)
+    private GnssAsyncProcessor asyncProcessor;  // 异步处理器
 
     // ==================== 缓冲区和锁 ====================
 
@@ -76,11 +78,14 @@ public class MixedLogSplitter {
 
     // ==================== 时间相关 ====================
 
-    /** 当前历元时间（从 GNGGA 解析） */
     private volatile Long currentEpochTime = null;
-
-    /** 最后打印时间 */
     private final AtomicLong lastPrintTime = new AtomicLong(System.currentTimeMillis());
+
+    // ==================== 统计信息 ====================
+
+    private final AtomicLong bufferOverflowCount = new AtomicLong(0);
+    private final AtomicLong nmeaCount = new AtomicLong(0);
+    private final AtomicLong rtcmCount = new AtomicLong(0);
 
     // ==================== 缓存的字符串常量 ====================
 
@@ -88,20 +93,15 @@ public class MixedLogSplitter {
     private static final String PREFIX_GPGGA = "$GPGGA";
     private static final String PREFIX_BDGGA = "$BDGGA";
 
-    // ==================== 统计信息 ====================
-
-    /** 缓冲区溢出计数 */
-    private final AtomicLong bufferOverflowCount = new AtomicLong(0);
-
     // ==================== 初始化 ====================
 
     @javax.annotation.PostConstruct
     public void init() {
         this.buffer = ByteBuffer.allocate(bufferSize);
-        logger.info("MixedLogSplitter 初始化完成（修复版），缓冲区大小: {} bytes", bufferSize);
+        logger.info("MixedLogSplitter 初始化完成（异步优化版），缓冲区大小: {} bytes", bufferSize);
 
         if (rtcmStorageService == null) {
-            logger.error("警告：rtcmStorageService 未注入！请检查 tdengine.enabled 配置！");
+            logger.warn("警告：rtcmStorageService 未注入");
         }
         if (gsvParser == null) {
             logger.warn("警告：gsvParser 未注入，GSV 解析功能将不可用");
@@ -109,20 +109,27 @@ public class MixedLogSplitter {
         if (fusionService == null) {
             logger.warn("警告：fusionService 未注入，数据融合功能将不可用");
         }
+        if (asyncProcessor == null) {
+            logger.warn("警告：asyncProcessor 未注入，将使用同步模式");
+        }
     }
 
     // ==================== 入口方法 ====================
 
+    /**
+     * 接收数据入口
+     *
+     * 优化：锁内只做数据解析，数据库 I/O 异步处理
+     */
     public void pushData(byte[] newBytes) {
         if (newBytes == null || newBytes.length == 0) return;
 
         bufferLock.lock();
         try {
-            // 修复：改进缓冲区满时的处理逻辑
+            // 改进的缓冲区管理
             if (!tryEnsureCapacity(newBytes.length)) {
-                // 无法容纳新数据，记录警告并丢弃
                 long overflowCount = bufferOverflowCount.incrementAndGet();
-                if (overflowCount % 100 == 1) {  // 每 100 次只打印一次
+                if (overflowCount % 100 == 1) {
                     logger.warn("缓冲区溢出，丢弃数据包，长度: {} bytes，累计溢出: {} 次",
                             newBytes.length, overflowCount);
                 }
@@ -131,12 +138,11 @@ public class MixedLogSplitter {
 
             buffer.put(newBytes);
             buffer.flip();
-            parseAndDispatch();
+            parseAndDispatch();  // 锁内只做解析，不做数据库 I/O
             buffer.compact();
 
         } catch (Exception e) {
             logger.error("数据接收缓冲区异常: {}", e.getMessage());
-            // 异常情况下才清空缓冲区
             if (buffer != null) {
                 buffer.clear();
             }
@@ -147,36 +153,25 @@ public class MixedLogSplitter {
 
     /**
      * 尝试确保缓冲区有足够容量
-     *
-     * 修复：不再直接清空缓冲区，而是尝试压缩或拒绝新数据
-     *
-     * @param required 需要的字节数
-     * @return true 表示可以容纳，false 表示无法容纳
      */
     private boolean tryEnsureCapacity(int required) {
-        // 如果剩余空间足够，直接返回
         if (buffer.remaining() >= required) {
             return true;
         }
 
-        // 尝试压缩缓冲区（移动已读数据到开头）
         buffer.compact();
         buffer.flip();
         buffer.compact();
 
-        // 压缩后再次检查
         if (buffer.remaining() >= required) {
             return true;
         }
 
-        // 如果新数据比整个缓冲区还大，无法处理
         if (required > buffer.capacity()) {
             logger.error("数据包过大，超过缓冲区容量: {} > {}", required, buffer.capacity());
             return false;
         }
 
-        // 缓冲区已满，但新数据可以放入空缓冲区
-        // 这里选择丢弃当前缓冲区中的半包数据（记录警告）
         int lostBytes = buffer.position();
         if (lostBytes > 0) {
             logger.warn("缓冲区已满，丢弃 {} bytes 未处理的半包数据", lostBytes);
@@ -254,11 +249,16 @@ public class MixedLogSplitter {
         return true;
     }
 
-    // ==================== NMEA 处理 ====================
+    // ==================== NMEA 处理（异步优化） ====================
 
     private void notifyNmea(String nmea) {
-        // 存储原始 NMEA 数据
-        if (nmeaStorageService != null) {
+        nmeaCount.incrementAndGet();
+
+        // 异步存储原始 NMEA 数据
+        if (asyncProcessor != null) {
+            asyncProcessor.submitNmea(nmea);
+        } else if (nmeaStorageService != null) {
+            // 降级：同步存储
             NmeaRecord record = new NmeaRecord(new Date(), nmea);
             nmeaStorageService.saveNmeaData(record);
         }
@@ -268,7 +268,7 @@ public class MixedLogSplitter {
             processGgaData(nmea);
         }
 
-        // 处理 GSV 语句 - 直接委托给 fusionService
+        // 处理 GSV 语句
         if (fusionService != null && gsvParser != null && gsvParser.isGsvSentence(nmea)) {
             fusionService.processGsvData(nmea);
         }
@@ -281,25 +281,29 @@ public class MixedLogSplitter {
         }
     }
 
-    /**
-     * 判断是否为 GGA 语句
-     */
     private boolean isGgaSentence(String nmea) {
         return nmea.startsWith(PREFIX_GNGGA) ||
                 nmea.startsWith(PREFIX_GPGGA) ||
                 nmea.startsWith(PREFIX_BDGGA);
     }
 
-    /**
-     * 处理 GGA 数据（提取历元时间和定位信息）
-     */
     private void processGgaData(String ggaLine) {
         try {
             String[] parts = ggaLine.split(",", -1);
-            if (parts.length < 10 || parts[2].isEmpty() || parts[4].isEmpty()) return;
+
+            // 防御性检查：确保数组长度足够
+            if (parts.length < 10) {
+                return;
+            }
+
+            // 防御性检查：确保必要字段不为空
+            if (parts[2] == null || parts[2].isEmpty() ||
+                    parts[4] == null || parts[4].isEmpty()) {
+                return;
+            }
 
             // 提取 UTC 时间作为历元时间
-            if (parts.length > 1 && !parts[1].isEmpty()) {
+            if (parts.length > 1 && parts[1] != null && !parts[1].isEmpty()) {
                 currentEpochTime = parseUtcTime(parts[1]);
                 if (fusionService != null) {
                     fusionService.setEpochTime(currentEpochTime);
@@ -308,24 +312,29 @@ public class MixedLogSplitter {
 
             double lat = nmeaToDecimal(parts[2], parts[3]);
             double lon = nmeaToDecimal(parts[4], parts[5]);
-            int satUsed = parts[7].isEmpty() ? 0 : Integer.parseInt(parts[7]);
-            double hdop = parts[8].isEmpty() ? 0.0 : Double.parseDouble(parts[8]);
-            double alt = parts[9].isEmpty() ? 0.0 : Double.parseDouble(parts[9]);
-            int status = parts[6].isEmpty() ? 0 : Integer.parseInt(parts[6]);
 
+            // 防御性解析
+            int satUsed = safeParseInt(parts[7], 0);
+            double hdop = safeParseDouble(parts[8], 0.0);
+            double alt = safeParseDouble(parts[9], 0.0);
+            int status = safeParseInt(parts[6], 0);
+
+            // 异步存储 GNSS 解算结果
             if (gnssStorageService != null) {
                 GnssSolution solution = new GnssSolution(new Date(), lat, lon, alt, status, satUsed);
                 solution.setHdop(hdop);
-                gnssStorageService.saveSolution(solution);
+
+                if (asyncProcessor != null) {
+                    asyncProcessor.submitGnssSolution(solution);
+                } else {
+                    gnssStorageService.saveSolution(solution);
+                }
             }
         } catch (Exception e) {
             logger.error("GGA 解析失败: {}", e.getMessage());
         }
     }
 
-    /**
-     * 解析 UTC 时间字符串为毫秒时间戳
-     */
     private Long parseUtcTime(String utcTime) {
         if (utcTime == null || utcTime.length() < 6) {
             return null;
@@ -366,15 +375,44 @@ public class MixedLogSplitter {
         } catch (Exception e) { return 0.0; }
     }
 
-    // ==================== RTCM 处理 ====================
+    // ==================== 安全解析方法 ====================
+
+    private int safeParseInt(String value, int defaultValue) {
+        if (value == null || value.isEmpty()) {
+            return defaultValue;
+        }
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
+    }
+
+    private double safeParseDouble(String value, double defaultValue) {
+        if (value == null || value.isEmpty()) {
+            return defaultValue;
+        }
+        try {
+            return Double.parseDouble(value);
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
+    }
+
+    // ==================== RTCM 处理（异步优化） ====================
 
     private void notifyRtcm(byte[] data) {
-        // 存储原始 RTCM 数据
-        if (rtcmStorageService != null) {
+        rtcmCount.incrementAndGet();
+
+        // 异步存储原始 RTCM 数据
+        if (asyncProcessor != null) {
+            asyncProcessor.submitRtcm(data);
+        } else if (rtcmStorageService != null) {
+            // 降级：同步存储
             rtcmStorageService.saveRtcmRawData(data);
         }
 
-        // 解算 RTCM 数据
+        // 解算 RTCM 数据（JNA 调用，仍在锁内但很快）
         decodeRtcmData(data);
 
         // 通知监听器
@@ -402,9 +440,6 @@ public class MixedLogSplitter {
         }
     }
 
-    /**
-     * 更新卫星缓存
-     */
     private void updateSatCache(RtklibNative.JavaObs[] newObs, int count, byte[] rtcmData) {
         int rtcmMessageType = getRtcmMessageType(rtcmData);
 
@@ -444,9 +479,6 @@ public class MixedLogSplitter {
         }
     }
 
-    /**
-     * 获取 RTCM 消息类型
-     */
     private int getRtcmMessageType(byte[] rtcmData) {
         if (rtcmData == null || rtcmData.length < 6) {
             return 0;
@@ -454,9 +486,6 @@ public class MixedLogSplitter {
         return ((rtcmData[3] & 0xFF) << 4) | ((rtcmData[4] & 0xF0) >> 4);
     }
 
-    /**
-     * 执行数据融合和入库
-     */
     private void fuseAndStoreData() {
         if (fusionService != null) {
             fusionService.fuseAndStore();
@@ -469,10 +498,23 @@ public class MixedLogSplitter {
         return currentEpochTime;
     }
 
-    /**
-     * 获取缓冲区溢出计数
-     */
     public long getBufferOverflowCount() {
         return bufferOverflowCount.get();
+    }
+
+    public long getNmeaCount() {
+        return nmeaCount.get();
+    }
+
+    public long getRtcmCount() {
+        return rtcmCount.get();
+    }
+
+    public String getStatistics() {
+        if (asyncProcessor != null) {
+            return asyncProcessor.getStatistics();
+        }
+        return String.format("NMEA=%d, RTCM=%d, Overflow=%d",
+                nmeaCount.get(), rtcmCount.get(), bufferOverflowCount.get());
     }
 }
