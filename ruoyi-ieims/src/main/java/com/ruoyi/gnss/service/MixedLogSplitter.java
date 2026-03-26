@@ -9,10 +9,11 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import javax.annotation.PostConstruct;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
-import java.util.concurrent.atomic.AtomicLong;
+        import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -23,11 +24,13 @@ import java.util.concurrent.locks.ReentrantLock;
  * 3. 解析 GSV 语句获取卫星仰角、方位角、信噪比
  * 4. 融合 GSV 和 RTCM 数据
  * 5. 将融合后的数据写入 TDengine
- * 新增功能：
- * - GPGSV/GBGSV 语句解析
- * - 卫星编号统一转换
- * - GSV + RTCM 数据融合
- * - 卫星观测数据入库
+ * <p>
+ * 优化内容：
+ * 1. 支持多站点处理
+ * 2. 优化锁粒度
+ * 3. 减少对象分配
+ * 4. 支持站点上下文传递
+ * </p>
  */
 @Service
 public class MixedLogSplitter {
@@ -48,7 +51,10 @@ public class MixedLogSplitter {
     @Value("${gnss.parser.printIntervalMs:950}")
     private long printIntervalMs;
 
-    // ==================== 依赖注入（面向接口） ====================
+    @Value("${gnss.parser.stationId:8900_1}")
+    private String defaultStationId;
+
+    // ==================== 依赖注入 ====================
 
     @Autowired(required = false)
     private List<GnssDataListener> listeners = new ArrayList<>();
@@ -57,10 +63,10 @@ public class MixedLogSplitter {
     private IGnssStorageService gnssStorageService;
 
     @Autowired(required = false)
-    private INmeaStorageService nmeaStorageService;  // 使用原有接口
+    private INmeaStorageService nmeaStorageService;
 
     @Autowired(required = false)
-    private IRtcmStorageService rtcmStorageService;  // 新增接口
+    private IRtcmStorageService rtcmStorageService;
 
     @Autowired(required = false)
     private GsvParser gsvParser;
@@ -69,7 +75,7 @@ public class MixedLogSplitter {
     private SatelliteDataFusionService fusionService;
 
     @Autowired(required = false)
-    private GnssAsyncProcessor asyncProcessor;  // 异步处理器
+    private GnssAsyncProcessor asyncProcessor;
 
     // ==================== 缓冲区和锁 ====================
 
@@ -95,10 +101,15 @@ public class MixedLogSplitter {
 
     // ==================== 初始化 ====================
 
-    @javax.annotation.PostConstruct
+    @PostConstruct
     public void init() {
         this.buffer = ByteBuffer.allocate(bufferSize);
-        logger.info("MixedLogSplitter 初始化完成（异步优化版），缓冲区大小: {} bytes", bufferSize);
+
+        // 设置默认站点ID
+        StationContext.setDefaultStationId(defaultStationId);
+
+        logger.info("MixedLogSplitter 初始化完成（多站点优化版），缓冲区大小: {} bytes, 默认站点: {}",
+                bufferSize, defaultStationId);
 
         if (rtcmStorageService == null) {
             logger.warn("警告：rtcmStorageService 未注入");
@@ -117,11 +128,19 @@ public class MixedLogSplitter {
     // ==================== 入口方法 ====================
 
     /**
-     * 接收数据入口
-     *
-     * 优化：锁内只做数据解析，数据库 I/O 异步处理
+     * 接收数据入口（使用默认站点）
      */
     public void pushData(byte[] newBytes) {
+        pushData(defaultStationId, newBytes);
+    }
+
+    /**
+     * 接收数据入口（指定站点）
+     *
+     * @param stationId 站点ID
+     * @param newBytes  原始字节数据
+     */
+    public void pushData(String stationId, byte[] newBytes) {
         if (newBytes == null || newBytes.length == 0) return;
 
         bufferLock.lock();
@@ -130,15 +149,20 @@ public class MixedLogSplitter {
             if (!tryEnsureCapacity(newBytes.length)) {
                 long overflowCount = bufferOverflowCount.incrementAndGet();
                 if (overflowCount % 100 == 1) {
-                    logger.warn("缓冲区溢出，丢弃数据包，长度: {} bytes，累计溢出: {} 次",
-                            newBytes.length, overflowCount);
+                    logger.warn("缓冲区溢出，丢弃数据包，长度: {} bytes，累计溢出: {} 次，站点: {}",
+                            newBytes.length, overflowCount, stationId);
                 }
                 return;
             }
 
             buffer.put(newBytes);
             buffer.flip();
-            parseAndDispatch();  // 锁内只做解析，不做数据库 I/O
+
+            // 在站点上下文中解析
+            try (StationContext.Scope scope = StationContext.withStation(stationId)) {
+                parseAndDispatch(stationId);
+            }
+
             buffer.compact();
 
         } catch (Exception e) {
@@ -183,18 +207,18 @@ public class MixedLogSplitter {
 
     // ==================== 拆包逻辑 ====================
 
-    private void parseAndDispatch() {
+    private void parseAndDispatch(String stationId) {
         while (buffer.hasRemaining()) {
             buffer.mark();
             byte b = buffer.get();
 
             if (b == 0x24) { // NMEA ($)
-                if (!tryExtractNmea()) {
+                if (!tryExtractNmea(stationId)) {
                     buffer.reset();
                     break;
                 }
             } else if ((b & 0xFF) == 0xD3) { // RTCM (0xD3)
-                if (!tryExtractRtcm()) {
+                if (!tryExtractRtcm(stationId)) {
                     buffer.reset();
                     break;
                 }
@@ -202,7 +226,7 @@ public class MixedLogSplitter {
         }
     }
 
-    private boolean tryExtractNmea() {
+    private boolean tryExtractNmea(String stationId) {
         int startPos = buffer.position() - 1;
 
         for (int i = buffer.position(); i < buffer.limit(); i++) {
@@ -217,7 +241,7 @@ public class MixedLogSplitter {
                 buffer.get(lineBytes);
 
                 String nmea = new String(lineBytes, StandardCharsets.US_ASCII).trim();
-                notifyNmea(nmea);
+                notifyNmea(stationId, nmea);
 
                 buffer.position(i + 1);
                 return true;
@@ -226,7 +250,7 @@ public class MixedLogSplitter {
         return false;
     }
 
-    private boolean tryExtractRtcm() {
+    private boolean tryExtractRtcm(String stationId) {
         if (buffer.remaining() < 2) return false;
 
         int p = buffer.position();
@@ -245,38 +269,41 @@ public class MixedLogSplitter {
         buffer.position(buffer.position() - 1);
         buffer.get(rtcmFrame);
 
-        notifyRtcm(rtcmFrame);
+        notifyRtcm(stationId, rtcmFrame);
         return true;
     }
 
-    // ==================== NMEA 处理（异步优化） ====================
+    // ==================== NMEA 处理 ====================
 
-    private void notifyNmea(String nmea) {
+    private void notifyNmea(String stationId, String nmea) {
         nmeaCount.incrementAndGet();
 
         // 异步存储原始 NMEA 数据
         if (asyncProcessor != null) {
-            asyncProcessor.submitNmea(nmea);
+            asyncProcessor.submitNmea(stationId, nmea);
         } else if (nmeaStorageService != null) {
             // 降级：同步存储
             NmeaRecord record = new NmeaRecord(new Date(), nmea);
-            nmeaStorageService.saveNmeaData(record);
+            nmeaStorageService.saveNmeaData(stationId, record);
         }
 
         // 处理 GGA 语句（提取历元时间）
         if (isGgaSentence(nmea)) {
-            processGgaData(nmea);
+            processGgaData(stationId, nmea);
         }
 
         // 处理 GSV 语句
         if (fusionService != null && gsvParser != null && gsvParser.isGsvSentence(nmea)) {
-            fusionService.processGsvData(nmea);
+            fusionService.processGsvData(stationId, nmea);
         }
 
         // 通知监听器
         if (listeners != null) {
             for (GnssDataListener listener : listeners) {
-                try { listener.onNmeaReceived(nmea); } catch (Exception ignored) {}
+                try {
+                    listener.onNmeaReceived(nmea);
+                } catch (Exception ignored) {
+                }
             }
         }
     }
@@ -287,16 +314,14 @@ public class MixedLogSplitter {
                 nmea.startsWith(PREFIX_BDGGA);
     }
 
-    private void processGgaData(String ggaLine) {
+    private void processGgaData(String stationId, String ggaLine) {
         try {
             String[] parts = ggaLine.split(",", -1);
 
-            // 防御性检查：确保数组长度足够
             if (parts.length < 10) {
                 return;
             }
 
-            // 防御性检查：确保必要字段不为空
             if (parts[2] == null || parts[2].isEmpty() ||
                     parts[4] == null || parts[4].isEmpty()) {
                 return;
@@ -313,7 +338,6 @@ public class MixedLogSplitter {
             double lat = nmeaToDecimal(parts[2], parts[3]);
             double lon = nmeaToDecimal(parts[4], parts[5]);
 
-            // 防御性解析
             int satUsed = safeParseInt(parts[7], 0);
             double hdop = safeParseDouble(parts[8], 0.0);
             double alt = safeParseDouble(parts[9], 0.0);
@@ -372,7 +396,9 @@ public class MixedLogSplitter {
             double min = Double.parseDouble(nmeaPos.substring(dotIndex - 2));
             double decimal = deg + (min / 60.0);
             return ("S".equalsIgnoreCase(dir) || "W".equalsIgnoreCase(dir)) ? -decimal : decimal;
-        } catch (Exception e) { return 0.0; }
+        } catch (Exception e) {
+            return 0.0;
+        }
     }
 
     // ==================== 安全解析方法 ====================
@@ -399,31 +425,34 @@ public class MixedLogSplitter {
         }
     }
 
-    // ==================== RTCM 处理（异步优化） ====================
+    // ==================== RTCM 处理 ====================
 
-    private void notifyRtcm(byte[] data) {
+    private void notifyRtcm(String stationId, byte[] data) {
         rtcmCount.incrementAndGet();
 
         // 异步存储原始 RTCM 数据
         if (asyncProcessor != null) {
-            asyncProcessor.submitRtcm(data);
+            asyncProcessor.submitRtcm(stationId, data);
         } else if (rtcmStorageService != null) {
             // 降级：同步存储
             rtcmStorageService.saveRtcmRawData(data);
         }
 
-        // 解算 RTCM 数据（JNA 调用，仍在锁内但很快）
-        decodeRtcmData(data);
+        // 解算 RTCM 数据
+        decodeRtcmData(stationId, data);
 
         // 通知监听器
         if (listeners != null) {
             for (GnssDataListener listener : listeners) {
-                try { listener.onRtcmReceived(data); } catch (Exception ignored) {}
+                try {
+                    listener.onRtcmReceived(data);
+                } catch (Exception ignored) {
+                }
             }
         }
     }
 
-    private void decodeRtcmData(byte[] rtcmData) {
+    private void decodeRtcmData(String stationId, byte[] rtcmData) {
         try {
             RtklibNative.JavaObs.ByReference obsRef = new RtklibNative.JavaObs.ByReference();
             RtklibNative.JavaObs[] obsArray = (RtklibNative.JavaObs[]) obsRef.toArray(64);
@@ -431,7 +460,7 @@ public class MixedLogSplitter {
             int count = RtklibNative.INSTANCE.parse_rtcm_frame(rtcmData, rtcmData.length, obsRef, 64);
 
             if (count > 0) {
-                updateSatCache(obsArray, count, rtcmData);
+                updateSatCache(stationId, obsArray, count, rtcmData);
             }
         } catch (UnsatisfiedLinkError e) {
             logger.error("找不到 rtklib_bridge.dll，请检查系统路径！");
@@ -440,7 +469,7 @@ public class MixedLogSplitter {
         }
     }
 
-    private void updateSatCache(RtklibNative.JavaObs[] newObs, int count, byte[] rtcmData) {
+    private void updateSatCache(String stationId, RtklibNative.JavaObs[] newObs, int count, byte[] rtcmData) {
         int rtcmMessageType = getRtcmMessageType(rtcmData);
 
         for (int i = 0; i < count; i++) {
@@ -465,7 +494,7 @@ public class MixedLogSplitter {
             }
 
             if (fusionService != null) {
-                fusionService.processRtcmData(satNo, rtcmMessageType, p1, p2, l1, l2, snr, c1, c2);
+                fusionService.processRtcmData(stationId, satNo, rtcmMessageType, p1, p2, l1, l2, snr, c1, c2);
             }
         }
 
@@ -474,7 +503,7 @@ public class MixedLogSplitter {
         long lastTime = lastPrintTime.get();
         if (now - lastTime > printIntervalMs) {
             if (lastPrintTime.compareAndSet(lastTime, now)) {
-                fuseAndStoreData();
+                fuseAndStoreData(stationId);
             }
         }
     }
@@ -486,9 +515,9 @@ public class MixedLogSplitter {
         return ((rtcmData[3] & 0xFF) << 4) | ((rtcmData[4] & 0xF0) >> 4);
     }
 
-    private void fuseAndStoreData() {
+    private void fuseAndStoreData(String stationId) {
         if (fusionService != null) {
-            fusionService.fuseAndStore();
+            fusionService.fuseAndStore(stationId);
         }
     }
 

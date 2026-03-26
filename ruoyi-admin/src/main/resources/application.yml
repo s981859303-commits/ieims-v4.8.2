@@ -131,6 +131,24 @@ gnss:
     # 最小磁盘空间（MB）
     min-disk-space-mb: 100
 
+  # ==================== 异步处理配置 ====================
+  async:
+    queueSize: 10000
+    batchSize: 100
+    flushIntervalMs: 1000
+    consumerThreads: 2
+    backpressureThreshold: 0.8    # 队列使用率 80% 时触发背压
+    backpressureWaitMs: 10        # 背压等待时间
+
+  # ==================== NMEA 存储配置 ====================
+  nmea:
+    batchSize: 100
+
+  # ==================== 数据融合配置 ====================
+  fusion:
+    intervalMs: 1000
+    epochTimeoutMs: 2000
+    cacheMaxSize: 10000
 
   # Spring配置
 spring:
