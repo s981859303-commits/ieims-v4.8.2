@@ -1,8 +1,10 @@
+// 文件路径：ieims-v4.8.2/ruoyi-ieims/src/main/java/com/ruoyi/gnss/service/MixedLogSplitter.java
 package com.ruoyi.gnss.service;
 
 import com.ruoyi.gnss.domain.GnssSolution;
 import com.ruoyi.gnss.domain.NmeaRecord;
 import com.ruoyi.gnss.service.impl.SatelliteDataFusionService;
+import com.sun.jna.Pointer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -13,24 +15,26 @@ import javax.annotation.PostConstruct;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
-        import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * 混合日志解析器
+ *
  * 功能：
  * 1. 解析 NMEA 和 RTCM 混合数据流
  * 2. 调用 RtklibNative 解析 RTCM 观测数据
  * 3. 解析 GSV 语句获取卫星仰角、方位角、信噪比
  * 4. 融合 GSV 和 RTCM 数据
  * 5. 将融合后的数据写入 TDengine
- * <p>
- * 优化内容：
- * 1. 支持多站点处理
- * 2. 优化锁粒度
- * 3. 减少对象分配
- * 4. 支持站点上下文传递
- * </p>
+ *
+ * 改造说明：
+ * 1. 使用 RtklibContextManager 管理每个站点的独立 Context
+ * 2. 每个站点使用独立的 native 状态，互不干扰
+ * 3. 支持多基站并发处理
+ *
+ * @author GNSS Team
+ * @date 2026-03-26
  */
 @Service
 public class MixedLogSplitter {
@@ -77,6 +81,9 @@ public class MixedLogSplitter {
     @Autowired(required = false)
     private GnssAsyncProcessor asyncProcessor;
 
+    @Autowired
+    private RtklibContextManager contextManager;
+
     // ==================== 缓冲区和锁 ====================
 
     private ByteBuffer buffer;
@@ -108,8 +115,16 @@ public class MixedLogSplitter {
         // 设置默认站点ID
         StationContext.setDefaultStationId(defaultStationId);
 
-        logger.info("MixedLogSplitter 初始化完成（多站点优化版），缓冲区大小: {} bytes, 默认站点: {}",
-                bufferSize, defaultStationId);
+        // 初始化默认站点的 Context
+        try {
+            Pointer ctx = contextManager.getOrCreateContext(defaultStationId);
+            logger.info("默认站点 Context 已创建: stationId={}, ptr={}", defaultStationId, ctx);
+        } catch (Exception e) {
+            logger.warn("创建默认站点 Context 失败: {}", e.getMessage());
+        }
+
+        logger.info("MixedLogSplitter 初始化完成（多站点优化版），缓冲区大小: {} bytes, 默认站点: {}, DLL版本: {}",
+                bufferSize, defaultStationId, contextManager.getDllVersion());
 
         if (rtcmStorageService == null) {
             logger.warn("警告：rtcmStorageService 未注入");
@@ -425,7 +440,7 @@ public class MixedLogSplitter {
         }
     }
 
-    // ==================== RTCM 处理 ====================
+    // ==================== RTCM 处理（使用独立 Context） ====================
 
     private void notifyRtcm(String stationId, byte[] data) {
         rtcmCount.incrementAndGet();
@@ -438,7 +453,7 @@ public class MixedLogSplitter {
             rtcmStorageService.saveRtcmRawData(data);
         }
 
-        // 解算 RTCM 数据
+        // 解算 RTCM 数据（使用独立 Context）
         decodeRtcmData(stationId, data);
 
         // 通知监听器
@@ -452,12 +467,26 @@ public class MixedLogSplitter {
         }
     }
 
+    /**
+     * 解码 RTCM 数据（使用独立 Context）
+     *
+     * 关键改造：每个站点使用独立的 native Context，互不干扰
+     */
     private void decodeRtcmData(String stationId, byte[] rtcmData) {
         try {
+            // 获取或创建站点对应的 Context
+            Pointer ctx = contextManager.getOrCreateContext(stationId);
+            if (ctx == null) {
+                logger.error("无法获取站点 Context: stationId={}", stationId);
+                return;
+            }
+
+            // 使用带 Context 的解析函数
             RtklibNative.JavaObs.ByReference obsRef = new RtklibNative.JavaObs.ByReference();
             RtklibNative.JavaObs[] obsArray = (RtklibNative.JavaObs[]) obsRef.toArray(64);
 
-            int count = RtklibNative.INSTANCE.parse_rtcm_frame(rtcmData, rtcmData.length, obsRef, 64);
+            int count = RtklibNative.INSTANCE.rtklib_parse_rtcm_frame_ex(
+                    ctx, rtcmData, rtcmData.length, obsRef, 64);
 
             if (count > 0) {
                 updateSatCache(stationId, obsArray, count, rtcmData);
@@ -465,7 +494,7 @@ public class MixedLogSplitter {
         } catch (UnsatisfiedLinkError e) {
             logger.error("找不到 rtklib_bridge.dll，请检查系统路径！");
         } catch (Exception e) {
-            logger.error("RTCM 解码异常: {}", e.getMessage());
+            logger.error("RTCM 解码异常: stationId={}, error={}", stationId, e.getMessage());
         }
     }
 
@@ -539,11 +568,33 @@ public class MixedLogSplitter {
         return rtcmCount.get();
     }
 
+    /**
+     * 获取当前活跃的 Context 数量
+     */
+    public int getActiveContextCount() {
+        return contextManager.getActiveContextCount();
+    }
+
+    /**
+     * 获取所有站点ID
+     */
+    public java.util.Set<String> getAllStationIds() {
+        return contextManager.getAllStationIds();
+    }
+
+    /**
+     * 重置站点 Context
+     */
+    public boolean resetStationContext(String stationId) {
+        return contextManager.resetContext(stationId);
+    }
+
     public String getStatistics() {
         if (asyncProcessor != null) {
-            return asyncProcessor.getStatistics();
+            return asyncProcessor.getStatistics() +
+                    String.format(", Contexts=%d", getActiveContextCount());
         }
-        return String.format("NMEA=%d, RTCM=%d, Overflow=%d",
-                nmeaCount.get(), rtcmCount.get(), bufferOverflowCount.get());
+        return String.format("NMEA=%d, RTCM=%d, Overflow=%d, Contexts=%d",
+                nmeaCount.get(), rtcmCount.get(), bufferOverflowCount.get(), getActiveContextCount());
     }
 }

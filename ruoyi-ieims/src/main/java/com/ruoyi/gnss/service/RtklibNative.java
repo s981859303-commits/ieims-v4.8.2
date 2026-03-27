@@ -1,11 +1,22 @@
+// 文件路径：ieims-v4.8.2/ruoyi-ieims/src/main/java/com/ruoyi/gnss/service/RtklibNative.java
 package com.ruoyi.gnss.service;
 
 import com.sun.jna.Library;
 import com.sun.jna.Native;
 import com.sun.jna.Structure;
+import com.sun.jna.Pointer;
+import com.sun.jna.ptr.PointerByReference;
 
 /**
  * JNA 接口：用于调用 rtklib_bridge.dll
+ *
+ * 改造说明：
+ * 1. 新增 Context 相关接口
+ * 2. 新增带 Context 的解析函数
+ * 3. 保留旧接口以兼容现有代码
+ *
+ * @author GNSS Team
+ * @date 2026-03-26
  */
 public interface RtklibNative extends Library {
 
@@ -28,14 +39,90 @@ public interface RtklibNative extends Library {
         public static class ByValue extends JavaObs implements Structure.ByValue {}
     }
 
+    // ==================== 新增接口：Context 生命周期管理 ====================
+
     /**
-     * 调用 C 函数解析 RTCM 数据
+     * 创建新的 Context
      *
-     * @param buff    输入的二进制 RTCM 数据
-     * @param len     数据长度
-     * @param outObs  输出的观测值数组（内存由 Java 分配）
-     * @param maxObs  数组最大容量（防止 C 代码写越界）
-     * @return        解析出的卫星数量
+     * @param stationId 站点ID（可选，传null使用默认值）
+     * @return Context 指针（Pointer）
      */
+    Pointer rtklib_create_context(String stationId);
+
+    /**
+     * 销毁 Context
+     *
+     * @param handle Context 指针
+     */
+    void rtklib_destroy_context(Pointer handle);
+
+    /**
+     * 增加 Context 引用计数
+     *
+     * @param handle Context 指针
+     */
+    void rtklib_context_addref(Pointer handle);
+
+    /**
+     * 获取 Context 信息
+     *
+     * @param handle Context 指针
+     * @param stationIdOut 输出站点ID缓冲区
+     * @param stationIdSize 缓冲区大小
+     * @return Context ID，失败返回 -1
+     */
+    int rtklib_get_context_info(Pointer handle, byte[] stationIdOut, int stationIdSize);
+
+    // ==================== 新增接口：RTCM 解析（带 Context） ====================
+
+    /**
+     * 解析 RTCM 数据帧（带 Context）
+     *
+     * @param handle Context 指针
+     * @param buff 输入的二进制 RTCM 数据
+     * @param len 数据长度
+     * @param outObs 输出的观测值数组
+     * @param maxObs 数组最大容量
+     * @return 解析出的卫星数量，失败返回 -1
+     */
+    int rtklib_parse_rtcm_frame_ex(Pointer handle, byte[] buff, int len, JavaObs.ByReference outObs, int maxObs);
+
+    // ==================== 新增接口：工具函数 ====================
+
+    /**
+     * 获取 DLL 版本信息
+     *
+     * @return 版本字符串
+     */
+    String rtklib_get_version();
+
+    /**
+     * 获取当前活跃的 Context 数量
+     *
+     * @return 活跃 Context 数量
+     */
+    int rtklib_get_active_context_count();
+
+    /**
+     * 重置 Context 的 RTCM 状态
+     *
+     * @param handle Context 指针
+     * @return 0 成功，-1 失败
+     */
+    int rtklib_reset_context(Pointer handle);
+
+    // ==================== 兼容旧接口（已废弃） ====================
+
+    /**
+     * 调用 C 函数解析 RTCM 数据（旧接口，使用全局静态 Context）
+     *
+     * @deprecated 建议使用 rtklib_parse_rtcm_frame_ex
+     * @param buff 输入的二进制 RTCM 数据
+     * @param len 数据长度
+     * @param outObs 输出的观测值数组（内存由 Java 分配）
+     * @param maxObs 数组最大容量（防止 C 代码写越界）
+     * @return 解析出的卫星数量
+     */
+    @Deprecated
     int parse_rtcm_frame(byte[] buff, int len, JavaObs.ByReference outObs, int maxObs);
 }

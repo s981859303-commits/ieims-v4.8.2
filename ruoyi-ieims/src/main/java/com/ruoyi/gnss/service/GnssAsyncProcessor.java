@@ -16,22 +16,23 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.concurrent.*;
-        import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * GNSS 数据异步处理服务
+ * GNSS 数据异步处理服务（集成队列监控）
  *
  * <p>
  * 功能说明：
  * 1. 解耦 MQTT 接收线程与数据库 I/O
  * 2. 使用生产者-消费者模式
  * 3. 批量提交数据，提高写入效率
+ * 4. 集成队列监控告警
  * </p>
  *
  * @author GNSS Team
- * @date 2026-03-25
+ * @date 2026-03-26
  */
 @Service
 public class GnssAsyncProcessor {
@@ -74,6 +75,9 @@ public class GnssAsyncProcessor {
 
     @Autowired(required = false)
     private SatelliteDataFusionService fusionService;
+
+    @Autowired(required = false)
+    private QueueMonitorService queueMonitorService;
 
     // ==================== 队列定义 ====================
 
@@ -120,6 +124,17 @@ public class GnssAsyncProcessor {
         counters.put("satobs.submitted", new AtomicLong(0));
         counters.put("satobs.processed", new AtomicLong(0));
 
+        // 注册队列监控
+        if (queueMonitorService != null) {
+            queueMonitorService.registerQueue("NMEA", nmeaQueue, queueSize);
+            queueMonitorService.registerQueue("RTCM", rtcmQueue, queueSize);
+            queueMonitorService.registerQueue("SatObs", satObsQueue, queueSize);
+            queueMonitorService.registerQueue("GnssSolution", gnssSolutionQueue, queueSize);
+
+            // 添加告警监听器
+            queueMonitorService.addAlertListener(this::handleQueueAlert);
+        }
+
         // 初始化消费者线程池
         consumerPool = Executors.newFixedThreadPool(consumerThreads, r -> {
             Thread t = new Thread(r, "GNSS-Async-Consumer");
@@ -140,17 +155,24 @@ public class GnssAsyncProcessor {
         });
         flushScheduler.scheduleAtFixedRate(this::flushAll, flushIntervalMs, flushIntervalMs, TimeUnit.MILLISECONDS);
 
-        logger.info("GNSS 异步处理服务初始化完成，队列大小: {}, 批量大小: {}, 消费者线程: {}, 背压阈值: {}%",
-                queueSize, batchSize, consumerThreads, (int)(backpressureThreshold * 100));
+        logger.info("GNSS 异步处理服务初始化完成，队列大小: {}, 批量大小: {}, 消费者线程: {}, 背压阈值: {}%, 队列监控: {}",
+                queueSize, batchSize, consumerThreads, (int)(backpressureThreshold * 100),
+                queueMonitorService != null ? "已启用" : "未启用");
+    }
+
+    /**
+     * 处理队列告警事件
+     */
+    private void handleQueueAlert(QueueAlertEvent event) {
+        // 可以在这里添加额外的告警处理逻辑
+        // 例如：发送邮件、短信、调用外部API等
+        logger.info("收到队列告警: {}", event.getMessage());
     }
 
     // ==================== 生产者方法 ====================
 
     /**
      * 提交 NMEA 数据（带背压控制）
-     *
-     * @param nmea NMEA 语句
-     * @return true 表示提交成功
      */
     public boolean submitNmea(String nmea) {
         return submitNmea(null, nmea);
@@ -158,10 +180,6 @@ public class GnssAsyncProcessor {
 
     /**
      * 提交 NMEA 数据（指定站点，带背压控制）
-     *
-     * @param stationId 站点ID
-     * @param nmea      NMEA 语句
-     * @return true 表示提交成功
      */
     public boolean submitNmea(String stationId, String nmea) {
         if (nmea == null || nmea.isEmpty() || !running.get()) {
@@ -171,6 +189,9 @@ public class GnssAsyncProcessor {
         // 背压控制
         if (checkBackpressure(nmeaQueue)) {
             counters.get("nmea.dropped").incrementAndGet();
+            if (queueMonitorService != null) {
+                queueMonitorService.recordDrop("NMEA");
+            }
             return false;
         }
 
@@ -179,8 +200,14 @@ public class GnssAsyncProcessor {
 
         if (success) {
             counters.get("nmea.submitted").incrementAndGet();
+            if (queueMonitorService != null) {
+                queueMonitorService.recordProduce("NMEA");
+            }
         } else {
             counters.get("nmea.dropped").incrementAndGet();
+            if (queueMonitorService != null) {
+                queueMonitorService.recordDrop("NMEA");
+            }
             if (counters.get("nmea.dropped").get() % 100 == 1) {
                 logger.warn("NMEA 队列已满，丢弃数据 [累计丢弃: {}]", counters.get("nmea.dropped").get());
             }
@@ -191,9 +218,6 @@ public class GnssAsyncProcessor {
 
     /**
      * 提交 RTCM 数据（带背压控制）
-     *
-     * @param rtcmData RTCM 二进制数据
-     * @return true 表示提交成功
      */
     public boolean submitRtcm(byte[] rtcmData) {
         return submitRtcm(null, rtcmData);
@@ -201,10 +225,6 @@ public class GnssAsyncProcessor {
 
     /**
      * 提交 RTCM 数据（指定站点，带背压控制）
-     *
-     * @param stationId 站点ID
-     * @param rtcmData  RTCM 二进制数据
-     * @return true 表示提交成功
      */
     public boolean submitRtcm(String stationId, byte[] rtcmData) {
         if (rtcmData == null || rtcmData.length == 0 || !running.get()) {
@@ -214,6 +234,9 @@ public class GnssAsyncProcessor {
         // 背压控制
         if (checkBackpressure(rtcmQueue)) {
             counters.get("rtcm.dropped").incrementAndGet();
+            if (queueMonitorService != null) {
+                queueMonitorService.recordDrop("RTCM");
+            }
             return false;
         }
 
@@ -222,8 +245,14 @@ public class GnssAsyncProcessor {
 
         if (success) {
             counters.get("rtcm.submitted").incrementAndGet();
+            if (queueMonitorService != null) {
+                queueMonitorService.recordProduce("RTCM");
+            }
         } else {
             counters.get("rtcm.dropped").incrementAndGet();
+            if (queueMonitorService != null) {
+                queueMonitorService.recordDrop("RTCM");
+            }
         }
 
         return success;
@@ -249,6 +278,9 @@ public class GnssAsyncProcessor {
 
         if (success) {
             counters.get("satobs.submitted").addAndGet(observations.size());
+            if (queueMonitorService != null) {
+                queueMonitorService.recordProduce("SatObs");
+            }
         }
 
         return success;
@@ -263,7 +295,13 @@ public class GnssAsyncProcessor {
         }
 
         GnssSolutionTask task = new GnssSolutionTask(System.currentTimeMillis(), null, solution);
-        return gnssSolutionQueue.offer(task);
+        boolean success = gnssSolutionQueue.offer(task);
+
+        if (success && queueMonitorService != null) {
+            queueMonitorService.recordProduce("GnssSolution");
+        }
+
+        return success;
     }
 
     /**
@@ -374,10 +412,6 @@ public class GnssAsyncProcessor {
         }
 
         try {
-            // 按站点分组处理
-            // 这里简化处理，直接逐条保存
-            // 如果需要更高效的批量写入，可以按站点分组后调用 saveNmeaBatch
-
             for (NmeaTask task : batch) {
                 NmeaRecord record = new NmeaRecord(new Date(task.timestamp), task.nmea);
 
@@ -390,6 +424,9 @@ public class GnssAsyncProcessor {
 
                 if (success) {
                     counters.get("nmea.processed").incrementAndGet();
+                    if (queueMonitorService != null) {
+                        queueMonitorService.recordConsume("NMEA");
+                    }
                 }
             }
 
@@ -413,6 +450,10 @@ public class GnssAsyncProcessor {
                     rtcmStorageService.saveRtcmRawData(task.data);
                 }
                 counters.get("rtcm.processed").incrementAndGet();
+
+                if (queueMonitorService != null) {
+                    queueMonitorService.recordConsume("RTCM");
+                }
 
             } catch (InterruptedException e) {
                 logger.info("RTCM 消费者被中断");
@@ -444,6 +485,10 @@ public class GnssAsyncProcessor {
                 }
                 counters.get("satobs.processed").addAndGet(task.observations.size());
 
+                if (queueMonitorService != null) {
+                    queueMonitorService.recordConsume("SatObs");
+                }
+
             } catch (InterruptedException e) {
                 logger.info("卫星观测数据消费者被中断");
                 Thread.currentThread().interrupt();
@@ -469,6 +514,10 @@ public class GnssAsyncProcessor {
                     gnssStorageService.saveSolution(task.solution);
                 }
 
+                if (queueMonitorService != null) {
+                    queueMonitorService.recordConsume("GnssSolution");
+                }
+
             } catch (InterruptedException e) {
                 logger.info("GNSS 解算结果消费者被中断");
                 Thread.currentThread().interrupt();
@@ -491,7 +540,8 @@ public class GnssAsyncProcessor {
     // ==================== 统计方法 ====================
 
     public String getStatistics() {
-        return String.format(
+        StringBuilder sb = new StringBuilder();
+        sb.append(String.format(
                 "NMEA[submitted=%d, processed=%d, dropped=%d, pending=%d], " +
                         "RTCM[submitted=%d, processed=%d, dropped=%d, pending=%d], " +
                         "SatObs[submitted=%d, processed=%d, pending=%d], " +
@@ -509,7 +559,14 @@ public class GnssAsyncProcessor {
                 satObsQueue.size(),
                 backpressureCount.get(),
                 backpressureActive.get()
-        );
+        ));
+
+        // 添加队列监控状态
+        if (queueMonitorService != null) {
+            sb.append(", ").append(queueMonitorService.getStatusSummary());
+        }
+
+        return sb.toString();
     }
 
     public int getNmeaQueueSize() {
