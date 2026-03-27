@@ -140,6 +140,20 @@ gnss:
     backpressureThreshold: 0.8    # 队列使用率 80% 时触发背压
     backpressureWaitMs: 10        # 背压等待时间
 
+  # ==================== 队列监控配置 ====================
+  monitor:
+    enabled: true
+    checkIntervalMs: 5000
+    warningThreshold: 0.6
+    criticalThreshold: 0.8
+    emergencyThreshold: 0.95
+    backlogWarningMs: 30000
+    backlogCriticalMs: 60000
+    speedCheckWindowMs: 10000
+    speedRatioWarning: 0.5
+    alertCooldownMs: 60000
+    recoveryNotifyEnabled: true
+
   # ==================== NMEA 存储配置 ====================
   nmea:
     batchSize: 100

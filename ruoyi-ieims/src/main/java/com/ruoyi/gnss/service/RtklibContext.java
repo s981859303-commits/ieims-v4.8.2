@@ -1,3 +1,4 @@
+// 文件路径：ieims-v4.8.2/ruoyi-ieims/src/main/java/com/ruoyi/gnss/service/RtklibContext.java
 package com.ruoyi.gnss.service;
 
 import com.sun.jna.Pointer;
@@ -20,7 +21,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * <pre>
  * RtklibContext context = new RtklibContext("station_001");
  * try {
- *     int count = context.parseRtcm(rtcmData);
+ *     RtklibNative.JavaObs[] obs = context.parseRtcm(rtcmData);
  *     // 处理解析结果...
  * } finally {
  *     context.close(); // 或使用 try-with-resources
@@ -29,7 +30,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * </p>
  *
  * @author GNSS Team
- * @date 2026-03-26
+ * @date 2026-03-27
  */
 public class RtklibContext implements AutoCloseable {
 
@@ -64,24 +65,30 @@ public class RtklibContext implements AutoCloseable {
      * @param stationId 站点ID
      */
     public RtklibContext(String stationId) {
-        this.stationId = stationId;
+        this.stationId = stationId != null ? stationId : "default";
         this.createTime = System.currentTimeMillis();
 
         // 检查是否支持多实例模式
         boolean multiSupported = RtklibNative.isMultiInstanceSupported();
 
         if (multiSupported) {
-            this.handle = RtklibNative.INSTANCE.rtcm_create_context();
-            if (this.handle == null) {
-                throw new RuntimeException("Failed to create RTKLIB context for station: " + stationId);
+            try {
+                this.handle = RtklibNative.INSTANCE.rtklib_create_context(this.stationId);
+                if (this.handle == null) {
+                    throw new RuntimeException("Failed to create RTKLIB context for station: " + this.stationId);
+                }
+                this.compatibilityMode = false;
+                logger.info("创建 RTKLIB 上下文成功，站点: {}, 模式: 多实例", this.stationId);
+            } catch (UnsatisfiedLinkError e) {
+                logger.warn("DLL 加载失败，降级到兼容模式，站点: {}", this.stationId);
+                this.handle = null;
+                this.compatibilityMode = true;
             }
-            this.compatibilityMode = false;
-            logger.info("创建 RTKLIB 上下文成功，站点: {}, 模式: 多实例", stationId);
         } else {
             // 降级到兼容模式
             this.handle = null;
             this.compatibilityMode = true;
-            logger.warn("DLL 不支持多实例模式，站点 {} 使用兼容模式（可能有状态污染风险）", stationId);
+            logger.warn("DLL 不支持多实例模式，站点 {} 使用兼容模式（可能有状态污染风险）", this.stationId);
         }
     }
 
@@ -122,7 +129,7 @@ public class RtklibContext implements AutoCloseable {
                 count = RtklibNative.INSTANCE.parse_rtcm_frame(rtcmData, rtcmData.length, obsRef, maxObs);
             } else {
                 // 多实例模式：使用独立上下文
-                count = RtklibNative.INSTANCE.rtcm_parse_frame_ex(handle, rtcmData, rtcmData.length, obsRef, maxObs);
+                count = RtklibNative.INSTANCE.rtklib_parse_rtcm_frame_ex(handle, rtcmData, rtcmData.length, obsRef, maxObs);
             }
 
             parseCount.incrementAndGet();
@@ -165,7 +172,7 @@ public class RtklibContext implements AutoCloseable {
 
         if (!compatibilityMode && handle != null) {
             try {
-                RtklibNative.INSTANCE.rtcm_reset_context(handle);
+                RtklibNative.INSTANCE.rtklib_reset_context(handle);
                 logger.info("重置 RTKLIB 上下文，站点: {}", stationId);
             } catch (Exception e) {
                 logger.error("重置上下文失败，站点: {}, 错误: {}", stationId, e.getMessage());
@@ -188,8 +195,12 @@ public class RtklibContext implements AutoCloseable {
         if (!compatibilityMode && handle != null) {
             try {
                 stats = new RtklibNative.ContextStats.ByReference();
-                RtklibNative.INSTANCE.rtcm_get_context_stats(handle, stats);
-            } catch (Exception ignored) {
+                int result = RtklibNative.INSTANCE.rtklib_get_context_stats(handle, stats);
+                if (result != 0) {
+                    stats = null;
+                }
+            } catch (Exception e) {
+                stats = null;
             }
         }
 
@@ -252,12 +263,21 @@ public class RtklibContext implements AutoCloseable {
         return System.currentTimeMillis() - createTime;
     }
 
+    /**
+     * 获取 Native 句柄
+     *
+     * @return Native 句柄，兼容模式返回 null
+     */
+    public Pointer getHandle() {
+        return handle;
+    }
+
     @Override
     public void close() {
         if (closed.compareAndSet(false, true)) {
             if (!compatibilityMode && handle != null) {
                 try {
-                    RtklibNative.INSTANCE.rtcm_destroy_context(handle);
+                    RtklibNative.INSTANCE.rtklib_destroy_context(handle);
                     logger.info("销毁 RTKLIB 上下文，站点: {}", stationId);
                 } catch (Exception e) {
                     logger.error("销毁上下文失败，站点: {}, 错误: {}", stationId, e.getMessage());

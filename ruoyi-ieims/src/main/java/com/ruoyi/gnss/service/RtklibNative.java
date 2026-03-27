@@ -5,7 +5,6 @@ import com.sun.jna.Library;
 import com.sun.jna.Native;
 import com.sun.jna.Structure;
 import com.sun.jna.Pointer;
-import com.sun.jna.ptr.PointerByReference;
 
 /**
  * JNA 接口：用于调用 rtklib_bridge.dll
@@ -14,9 +13,10 @@ import com.sun.jna.ptr.PointerByReference;
  * 1. 新增 Context 相关接口
  * 2. 新增带 Context 的解析函数
  * 3. 保留旧接口以兼容现有代码
+ * 4. 函数名与DLL导出名完全一致
  *
  * @author GNSS Team
- * @date 2026-03-26
+ * @date 2026-03-27
  */
 public interface RtklibNative extends Library {
 
@@ -39,13 +39,26 @@ public interface RtklibNative extends Library {
         public static class ByValue extends JavaObs implements Structure.ByValue {}
     }
 
-    // ==================== 新增接口：Context 生命周期管理 ====================
+    /**
+     * Context 统计信息结构体
+     */
+    @Structure.FieldOrder({"totalFrames", "totalObs", "errorCount", "lastMessageType"})
+    public static class ContextStats extends Structure {
+        public int totalFrames;        // 总帧数
+        public int totalObs;           // 总观测值数
+        public int errorCount;         // 错误计数
+        public int lastMessageType;    // 最后消息类型
+
+        public static class ByReference extends ContextStats implements Structure.ByReference {}
+    }
+
+    // ==================== Context 生命周期管理 ====================
 
     /**
      * 创建新的 Context
      *
      * @param stationId 站点ID（可选，传null使用默认值）
-     * @return Context 指针（Pointer）
+     * @return Context 指针
      */
     Pointer rtklib_create_context(String stationId);
 
@@ -73,7 +86,7 @@ public interface RtklibNative extends Library {
      */
     int rtklib_get_context_info(Pointer handle, byte[] stationIdOut, int stationIdSize);
 
-    // ==================== 新增接口：RTCM 解析（带 Context） ====================
+    // ==================== RTCM 解析（带 Context） ====================
 
     /**
      * 解析 RTCM 数据帧（带 Context）
@@ -87,7 +100,7 @@ public interface RtklibNative extends Library {
      */
     int rtklib_parse_rtcm_frame_ex(Pointer handle, byte[] buff, int len, JavaObs.ByReference outObs, int maxObs);
 
-    // ==================== 新增接口：工具函数 ====================
+    // ==================== 工具函数 ====================
 
     /**
      * 获取 DLL 版本信息
@@ -111,6 +124,15 @@ public interface RtklibNative extends Library {
      */
     int rtklib_reset_context(Pointer handle);
 
+    /**
+     * 获取 Context 统计信息
+     *
+     * @param handle Context 指针
+     * @param stats 输出的统计信息结构体
+     * @return 0 成功，-1 失败
+     */
+    int rtklib_get_context_stats(Pointer handle, ContextStats.ByReference stats);
+
     // ==================== 兼容旧接口（已废弃） ====================
 
     /**
@@ -125,4 +147,20 @@ public interface RtklibNative extends Library {
      */
     @Deprecated
     int parse_rtcm_frame(byte[] buff, int len, JavaObs.ByReference outObs, int maxObs);
+
+    // ==================== 辅助方法 ====================
+
+    /**
+     * 检查 DLL 是否支持多实例模式
+     *
+     * @return true 表示支持多实例
+     */
+    static boolean isMultiInstanceSupported() {
+        try {
+            String version = INSTANCE.rtklib_get_version();
+            return version != null && version.contains("Multi-Context");
+        } catch (Exception e) {
+            return false;
+        }
+    }
 }

@@ -33,7 +33,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * </pre>
  *
  * @author GNSS Team
- * @date 2026-03-26
+ * @date 2026-03-27
  */
 @Component
 public class RtklibContextManager {
@@ -52,6 +52,9 @@ public class RtklibContextManager {
     /** DLL 版本 */
     private String dllVersion = "unknown";
 
+    /** 是否支持多实例 */
+    private volatile boolean multiInstanceSupported = false;
+
     /**
      * 初始化（延迟初始化，首次使用时调用）
      */
@@ -63,7 +66,10 @@ public class RtklibContextManager {
         try {
             // 获取 DLL 版本
             dllVersion = RtklibNative.INSTANCE.rtklib_get_version();
-            logger.info("RtklibContextManager 初始化完成，DLL 版本: {}", dllVersion);
+            multiInstanceSupported = RtklibNative.isMultiInstanceSupported();
+
+            logger.info("RtklibContextManager 初始化完成，DLL 版本: {}, 多实例支持: {}",
+                    dllVersion, multiInstanceSupported);
             initialized = true;
         } catch (UnsatisfiedLinkError e) {
             logger.error("找不到 rtklib_bridge.dll，请检查系统路径！");
@@ -78,7 +84,7 @@ public class RtklibContextManager {
      * 获取或创建站点 Context
      *
      * @param stationId 站点ID
-     * @return Context 指针
+     * @return Context 指针，如果不支持多实例则返回 null
      */
     public Pointer getOrCreateContext(String stationId) {
         ensureInitialized();
@@ -88,6 +94,12 @@ public class RtklibContextManager {
         }
 
         final String finalStationId = stationId;
+
+        // 如果不支持多实例，返回 null（调用方应使用兼容模式）
+        if (!multiInstanceSupported) {
+            logger.debug("DLL 不支持多实例，站点 {} 将使用兼容模式", finalStationId);
+            return null;
+        }
 
         return contextMap.computeIfAbsent(stationId, id -> {
             try {
@@ -277,6 +289,16 @@ public class RtklibContextManager {
     public String getDllVersion() {
         ensureInitialized();
         return dllVersion;
+    }
+
+    /**
+     * 是否支持多实例
+     *
+     * @return true 支持多实例
+     */
+    public boolean isMultiInstanceSupported() {
+        ensureInitialized();
+        return multiInstanceSupported;
     }
 
     /**
