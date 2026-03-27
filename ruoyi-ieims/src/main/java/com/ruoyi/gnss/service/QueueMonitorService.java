@@ -143,7 +143,7 @@ public class QueueMonitorService {
      * @param stationId   站点ID（可选）
      */
     public void registerQueue(String queueName, BlockingQueue<?> queue, int capacity, String stationId) {
-        QueueState state = new QueueState(queueName, queue, capacity, stationId);
+        QueueState state = new QueueState(queueName, queue, capacity, stationId, speedCheckWindowMs);
         queueStates.put(queueName, state);
         logger.info("注册队列监控: {} (容量: {}, 站点: {})", queueName, capacity, stationId != null ? stationId : "全局");
     }
@@ -227,7 +227,7 @@ public class QueueMonitorService {
 
         // 检查告警条件
         QueueAlertEvent.Level previousLevel = state.currentLevel;
-        QueueAlertEvent.Level newLevel = determineLevel(usageRatio, state.getBacklogDurationMs(now), produceRate, consumeRate);
+        QueueAlertEvent.Level newLevel = determineLevel(usageRatio, state.getBacklogDurationMs(now), produceRate, consumeRate, state.speedCheckWindowMs);
 
         // 状态变化处理
         if (newLevel != previousLevel) {
@@ -241,14 +241,14 @@ public class QueueMonitorService {
     }
 
     private QueueAlertEvent.Level determineLevel(double usageRatio, long backlogDurationMs,
-                                                 double produceRate, double consumeRate) {
+                                                 double produceRate, double consumeRate, long speedCheckWindow) {
         // 紧急：队列几乎满或消费停滞
         if (usageRatio >= emergencyThreshold) {
             return QueueAlertEvent.Level.EMERGENCY;
         }
 
         // 检查消费停滞
-        if (produceRate > 0 && consumeRate == 0 && backlogDurationMs > speedCheckWindowMs) {
+        if (produceRate > 0 && consumeRate == 0 && backlogDurationMs > speedCheckWindow) {
             return QueueAlertEvent.Level.EMERGENCY;
         }
 
@@ -465,11 +465,18 @@ public class QueueMonitorService {
 
     // ==================== 内部状态类 ====================
 
+    /**
+     * 队列状态内部类
+     *
+     * 修复说明：将 speedCheckWindowMs 作为构造函数参数传入，
+     * 解决静态内部类无法访问外部类实例字段的问题
+     */
     private static class QueueState {
         final String queueName;
         final BlockingQueue<?> queue;
         final int capacity;
         final String stationId;
+        final long speedCheckWindowMs;  // 新增：作为实例字段存储
 
         // 当前状态
         volatile int currentSize;
@@ -489,11 +496,12 @@ public class QueueMonitorService {
         final ConcurrentLinkedDeque<long[]> produceHistory = new ConcurrentLinkedDeque<>();
         final ConcurrentLinkedDeque<long[]> consumeHistory = new ConcurrentLinkedDeque<>();
 
-        QueueState(String queueName, BlockingQueue<?> queue, int capacity, String stationId) {
+        QueueState(String queueName, BlockingQueue<?> queue, int capacity, String stationId, long speedCheckWindowMs) {
             this.queueName = queueName;
             this.queue = queue;
             this.capacity = capacity;
             this.stationId = stationId;
+            this.speedCheckWindowMs = speedCheckWindowMs;  // 初始化
         }
 
         void updateSize(int size, double usageRatio) {

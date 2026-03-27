@@ -1,4 +1,3 @@
-// 文件路径：ieims-v4.8.2/ruoyi-ieims/src/main/java/com/ruoyi/gnss/service/RtklibContext.java
 package com.ruoyi.gnss.service;
 
 import com.sun.jna.Pointer;
@@ -71,25 +70,33 @@ public class RtklibContext implements AutoCloseable {
         // 检查是否支持多实例模式
         boolean multiSupported = RtklibNative.isMultiInstanceSupported();
 
+        // 初始化兼容模式标志（修复：确保在所有路径下都被赋值）
+        boolean isCompatibilityMode = true;  // 默认使用兼容模式
+        Pointer contextHandle = null;
+
         if (multiSupported) {
             try {
-                this.handle = RtklibNative.INSTANCE.rtklib_create_context(this.stationId);
-                if (this.handle == null) {
-                    throw new RuntimeException("Failed to create RTKLIB context for station: " + this.stationId);
+                contextHandle = RtklibNative.INSTANCE.rtklib_create_context(this.stationId);
+                if (contextHandle != null) {
+                    isCompatibilityMode = false;
+                    logger.info("创建 RTKLIB 上下文成功，站点: {}, 模式: 多实例", this.stationId);
+                } else {
+                    logger.warn("创建 Context 返回 null，降级到兼容模式，站点: {}", this.stationId);
                 }
-                this.compatibilityMode = false;
-                logger.info("创建 RTKLIB 上下文成功，站点: {}, 模式: 多实例", this.stationId);
             } catch (UnsatisfiedLinkError e) {
                 logger.warn("DLL 加载失败，降级到兼容模式，站点: {}", this.stationId);
-                this.handle = null;
-                this.compatibilityMode = true;
+                contextHandle = null;
+            } catch (Exception e) {
+                logger.warn("创建 Context 异常，降级到兼容模式，站点: {}, 错误: {}", this.stationId, e.getMessage());
+                contextHandle = null;
             }
         } else {
-            // 降级到兼容模式
-            this.handle = null;
-            this.compatibilityMode = true;
             logger.warn("DLL 不支持多实例模式，站点 {} 使用兼容模式（可能有状态污染风险）", this.stationId);
         }
+
+        // 最终赋值（修复：确保 final 字段只赋值一次）
+        this.handle = contextHandle;
+        this.compatibilityMode = isCompatibilityMode;
     }
 
     /**
