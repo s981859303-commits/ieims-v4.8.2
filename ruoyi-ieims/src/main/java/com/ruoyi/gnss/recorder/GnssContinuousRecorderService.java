@@ -1,6 +1,7 @@
 package com.ruoyi.gnss.recorder;
 
 import com.ruoyi.gnss.service.GnssDataListener;
+import com.ruoyi.gnss.service.ZdaParser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -45,6 +46,12 @@ public class GnssContinuousRecorderService implements GnssDataListener {
      * 配置属性
      */
     private GnssRecorderProperties properties;
+
+    /**
+      * ZDA 语句解析器（可选依赖，用于从 GNZDA 提取 GNSS 接收机日期）
+      */
+    @Autowired(required = false)
+    private ZdaParser zdaParser;
 
     // ==================== 核心组件 ====================
 
@@ -112,6 +119,22 @@ public class GnssContinuousRecorderService implements GnssDataListener {
      * 最后写入时间
      */
     private volatile long lastWriteTime = 0;
+
+    // ==================== GNZDA 日期跟踪 ====================
+
+    /**
+      * 最近一次从 GNZDA 语句解析出的日期字符串
+      * 使用 volatile 保证跨线程可见性（onNmeaReceived 在 MixedLogSplitter 线程，
+      * getCurrentDate 在 writer/monitor 线程）
+      */
+    private volatile String lastZdaDate = null;
+
+    /**
+      * 是否已成功接收到至少一次有效的 GNZDA 日期
+      * 一旦为 true，后续将始终优先使用 GNZDA 日期（而非系统日期），
+      * 避免因 GNZDA 暂时缺失导致日期回退到系统日期
+      */
+    private volatile boolean zdaDateAvailable = false;
 
     // ==================== Setter 注入 ====================
 
@@ -246,6 +269,25 @@ public class GnssContinuousRecorderService implements GnssDataListener {
 
     @Override
     public void onNmeaReceived(String nmea) {
+        // ===== GNZDA 日期解析（始终执行，不受 recordNmea 开关影响） =====
+        // 原因：ZDA 日期用于文件命名，即使不录制 NMEA 数据也需要日期信息
+        if (zdaParser != null && nmea != null && !nmea.isEmpty() && zdaParser.isZdaSentence(nmea)) {
+            try {
+                String zdaDate = zdaParser.parseDate(nmea, dateFormatter);
+                if (zdaDate != null) {
+                    this.lastZdaDate = zdaDate;
+                    if (!zdaDateAvailable) {
+                        zdaDateAvailable = true;
+                        logger.info("首次接收到有效的 GNZDA 日期: {} (将用于文件命名)", zdaDate);
+                    }
+                }
+            }catch (Exception e) {
+                // ZDA 解析异常不影响主流程
+                logger.debug("GNZDA 解析异常（不影响主流程）: {}", e.getMessage());
+            }
+        }
+
+        // ===== 原有录制逻辑 =====
         if (properties == null || !properties.isRecordNmea() || !running.get()) {
             return;
         }
@@ -808,8 +850,18 @@ public class GnssContinuousRecorderService implements GnssDataListener {
 
     /**
      * 获取当前日期字符串
+     * <p>
+     * 优先级：
+     * 1. 如果已收到有效的 GNZDA 日期，使用 GNZDA 日期（GNSS 接收机时间）
+     * 2. 否则使用系统日期（fallback，确保服务启动时或未收到 ZDA 时也能正常工作）
+     * <p>
+     * 注意：一旦 zdaDateAvailable 为 true，将始终使用 GNZDA 日期，
+     * 不会因 ZDA 暂时缺失而回退到系统日期，避免日期跳变导致异常文件切换。
      */
     private String getCurrentDate() {
+        if (zdaDateAvailable && lastZdaDate != null) {
+            return lastZdaDate;
+        }
         return LocalDate.now(zoneId).format(dateFormatter);
     }
 
