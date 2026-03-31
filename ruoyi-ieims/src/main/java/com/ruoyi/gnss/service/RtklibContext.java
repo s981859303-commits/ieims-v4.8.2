@@ -27,9 +27,6 @@ import java.util.concurrent.atomic.AtomicLong;
  * }
  * </pre>
  * </p>
- *
- * @author GNSS Team
- * @date 2026-03-27
  */
 public class RtklibContext implements AutoCloseable {
 

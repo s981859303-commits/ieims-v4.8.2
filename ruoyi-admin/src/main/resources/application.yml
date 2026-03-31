@@ -56,7 +56,7 @@ gnss:
     # MQTT Broker 地址
     broker: tcp://broker.emqx.io:1883
     # 订阅主题（接收 GNSS 数据）
-    topic: /USR-G780s/update
+    topic: /USER-G780s/update
     # 客户端 ID 前缀
     client-id-prefix: RuoYi_Client_
     # 用户名（可选）

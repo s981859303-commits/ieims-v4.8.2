@@ -1,4 +1,3 @@
-// 文件路径：ieims-v4.8.2/ruoyi-ieims/src/main/java/com/ruoyi/gnss/service/RtklibContextManager.java
 package com.ruoyi.gnss.service;
 
 import com.sun.jna.Pointer;

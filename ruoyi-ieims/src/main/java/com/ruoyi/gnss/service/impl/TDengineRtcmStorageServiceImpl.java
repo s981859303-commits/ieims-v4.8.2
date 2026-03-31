@@ -14,21 +14,7 @@ import java.util.Base64;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * RTCM 数据存储服务实现类（TDengine 版本）- 优化版
- *
- * <p>
- * 优化内容：
- * 1. 实现 IRtcmStorageService 接口，遵循依赖倒置原则
- * 2. 删除了 st_satellite_obs 建表逻辑（由 TDengineSatObservationServiceImpl 统一管理）
- * 3. 缓存常用字符串，避免重复计算
- * 4. 增加统计信息
- * </p>
- *
- * @author GNSS Team
- * @date 2026-03-25
- */
-/**
- * RTCM 观测数据存储服务实现类（TDengine 版本）
+ * RTCM 观测数据存储服务实现类
  *
  * <p>
  * 将 RTCM 1074/1127 解算出的卫星观测数据存储到 TDengine 数据库的 st_sat_obs 表中。
@@ -41,9 +27,6 @@ import java.util.concurrent.atomic.AtomicLong;
  * - 字段：ts、elevation、azimuth、c1、snr1、p1、l1、c2、snr2、p2、l2
  * - 标签：station_id、sat_name
  * </p>
- *
- * @author GNSS Team
- * @date 2026-03-23
  */
 @Service
 @ConditionalOnProperty(name = "gnss.tdengine.enabled", havingValue = "true", matchIfMissing = false)
@@ -97,8 +80,6 @@ public class TDengineRtcmStorageServiceImpl implements IRtcmStorageService {
 
     /**
      * 初始化超级表
-     *
-     * 注意：st_satellite_obs 表已删除，由 TDengineSatObservationServiceImpl 统一管理
      */
     private void initTables() {
         tdengineUtil.executeDDL("USE " + database);
