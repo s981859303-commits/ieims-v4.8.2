@@ -91,6 +91,7 @@ tdengine:
 
   # 原生 JDBC URL（替换 RS 为原生驱动，端口 6030）  taos -u root -pGuet@90-= -d ieims   dbev jdbc:TAOS://127.0.0.1:6030/ieims?charset=utf-8&locale=en_US.UTF-8
 #  url: jdbc:TAOS://127.0.0.1:6030/ieims?charset=utf-8&locale=en_US.UTF-8
+  #  url: jdbc:TAOS://10.60.117.10:6030/ieims?charset=utf-8&locale=en_US.UTF-8
   # 原生驱动类名（适配 6030 端口）
 #  driver-class-name: com.taosdata.jdbc.TSDBDriver
   username: root

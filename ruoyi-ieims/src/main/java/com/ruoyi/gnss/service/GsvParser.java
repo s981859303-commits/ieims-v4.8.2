@@ -29,8 +29,6 @@ import java.util.List;
  * - 123: 方位角（度，0-360）
  * - 42: 信噪比（dB-Hz，空表示未跟踪）
  *
- * @author GNSS Team
- * @date 2026-03-25
  */
 @Component
 public class GsvParser {

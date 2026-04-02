@@ -7,10 +7,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -22,12 +24,11 @@ import java.util.concurrent.atomic.AtomicLong;
  * 1. 缓存表名，避免重复计算
  * 2. 使用 volatile 修饰 initialized 保证可见性
  * 3. 添加统计计数器
- * 4. 支持批量写入
- * 5. 支持多站点
+ * 4. 支持多站点
+ * 5. 【核心修复】使用 JdbcTemplate 的批量 PreparedStatement 替代字符串拼接，彻底杜绝 SQL 注入并大幅提升批量写入性能
  * </p>
  *
  * @author GNSS Team
- * @date 2026-03-26
  */
 @Service
 @ConditionalOnProperty(name = "gnss.tdengine.enabled", havingValue = "true", matchIfMissing = false)
@@ -57,6 +58,11 @@ public class TDengineNmeaStorageServiceImpl implements INmeaStorageService {
 
     @Resource
     private TDengineUtil tdengineUtil;
+
+    // 引入 Spring 原生的 JdbcTemplate 进行高性能安全的批量插入
+    // (通常在配置 TDengine 数据源时，系统中会自动装配好对应的 JdbcTemplate)
+    @Resource
+    private JdbcTemplate jdbcTemplate;
 
     // ==================== 缓存变量（优化点） ====================
 
@@ -145,6 +151,7 @@ public class TDengineNmeaStorageServiceImpl implements INmeaStorageService {
 
             String nmeaType = extractNmeaType(record.getRawContent());
 
+            // 预编译参数化查询，防止单条 SQL 注入
             String insertSql = String.format(
                     "INSERT INTO %s (ts, nmea_type, raw_content) VALUES (?, ?, ?)",
                     tableName
@@ -153,7 +160,6 @@ public class TDengineNmeaStorageServiceImpl implements INmeaStorageService {
             tdengineUtil.executeUpdate(insertSql, timestamp, nmeaType, record.getRawContent());
             savedCount.incrementAndGet();
 
-            // 降低日志频率
             if (logger.isTraceEnabled()) {
                 logger.trace("NMEA 数据已存储: {}", nmeaType);
             }
@@ -161,7 +167,6 @@ public class TDengineNmeaStorageServiceImpl implements INmeaStorageService {
 
         } catch (Exception e) {
             failedCount.incrementAndGet();
-            // 每100次失败打印一次日志，避免日志刷屏
             long failCount = failedCount.get();
             if (failCount % 100 == 1) {
                 logger.error("存储 NMEA 数据失败 [累计失败: {}]: {}", failCount, e.getMessage());
@@ -183,14 +188,13 @@ public class TDengineNmeaStorageServiceImpl implements INmeaStorageService {
 
         try {
             String tableName = getTableName(stationId);
-
-            // 预估 SQL 长度：每条约 150 字节
-            int estimatedLength = 20 + records.size() * 150;
-            StringBuilder sqlBuilder = new StringBuilder(estimatedLength);
-            sqlBuilder.append("INSERT INTO ");
-
-            int successCount = 0;
             long currentTime = System.currentTimeMillis();
+
+            // 1. 构造带有占位符的单条 SQL 模板
+            String sql = String.format("INSERT INTO %s (ts, nmea_type, raw_content) VALUES (?, ?, ?)", tableName);
+
+            // 2. 将数据组装为批量参数列表
+            List<Object[]> batchArgs = new ArrayList<>(records.size());
 
             for (NmeaRecord record : records) {
                 if (record == null || record.getRawContent() == null) {
@@ -201,26 +205,22 @@ public class TDengineNmeaStorageServiceImpl implements INmeaStorageService {
                         record.getReceivedTime().getTime() : currentTime;
                 String nmeaType = extractNmeaType(record.getRawContent());
 
-                // 构建 VALUES 子句
-                sqlBuilder.append(tableName)
-                        .append(" VALUES (")
-                        .append(timestamp)
-                        .append(", '")
-                        .append(nmeaType)
-                        .append("', '")
-                        .append(escapeString(record.getRawContent()))
-                        .append("') ");
-
-                successCount++;
+                // 直接放入原始字符串，底层驱动的 PreparedStatement 会自动且安全地处理所有特殊字符转义
+                batchArgs.add(new Object[]{timestamp, nmeaType, record.getRawContent()});
             }
 
-            if (successCount > 0) {
-                tdengineUtil.executeUpdate(sqlBuilder.toString());
+            if (!batchArgs.isEmpty()) {
+                // 3. 执行真正的标准批量插入（底层驱动利用 Batch 技术一次性发往数据库）
+                jdbcTemplate.batchUpdate(sql, batchArgs);
+
+                int successCount = batchArgs.size();
                 savedCount.addAndGet(successCount);
                 batchSavedCount.incrementAndGet();
+
+                return successCount;
             }
 
-            return successCount;
+            return 0;
 
         } catch (Exception e) {
             failedCount.addAndGet(records.size());
@@ -251,7 +251,6 @@ public class TDengineNmeaStorageServiceImpl implements INmeaStorageService {
         if (stationId == null || stationId.equals(defaultStationId)) {
             return cachedDefaultTableName;
         }
-        // 非默认站点，动态计算表名
         return tablePrefix + sanitizeTableName(stationId);
     }
 
@@ -279,14 +278,5 @@ public class TDengineNmeaStorageServiceImpl implements INmeaStorageService {
         return name.replaceAll("[^a-zA-Z0-9_]", "_");
     }
 
-    /**
-     * 转义字符串中的特殊字符
-     */
-    private String escapeString(String str) {
-        if (str == null) {
-            return "";
-        }
-        // 转义单引号
-        return str.replace("'", "''");
-    }
+    // 注意：旧版的 escapeString(String str) 方法已被删除，因为使用了 PreparedStatement 后不再需要手动转义。
 }

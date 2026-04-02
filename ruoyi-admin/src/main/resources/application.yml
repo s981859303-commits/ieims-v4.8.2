@@ -106,31 +106,6 @@ gnss:
     # 密码
     password: Guet@90-=
 
-  # ==================== 录制服务配置 ====================
-  recorder:
-    # 是否启用录制
-    enabled: false
-    # 保存目录
-    save-dir: ./gnss-data
-    # 站点ID
-    station-id: 8900_1
-    # 文件后缀
-    file-suffix: .bin
-    # 是否按日期创建子目录
-    date-subdirectory: true
-    # 时区
-    timezone: Asia/Shanghai
-    # 录制 RTCM
-    record-rtcm: true
-    # 录制 NMEA
-    record-nmea: true
-    # 中断检测阈值（毫秒）
-    interruption-threshold-ms: 5000
-    # 中断告警阈值（毫秒）
-    interruption-warning-ms: 30000
-    # 最小磁盘空间（MB）
-    min-disk-space-mb: 100
-
   # ==================== 异步处理配置 ====================
   async:
     queueSize: 10000
@@ -153,6 +128,8 @@ gnss:
     speedRatioWarning: 0.5
     alertCooldownMs: 60000
     recoveryNotifyEnabled: true
+    highUsageThreshold: 0.5
+    shutdownTimeoutSec: 5
 
   # ==================== NMEA 存储配置 ====================
   nmea:

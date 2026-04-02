@@ -100,20 +100,60 @@ public class RtklibContextManager {
             return null;
         }
 
-        return contextMap.computeIfAbsent(stationId, id -> {
-            try {
-                Pointer ctx = RtklibNative.INSTANCE.rtklib_create_context(id);
-                if (ctx == null) {
-                    throw new RuntimeException("创建 Context 失败: " + id);
+        // 先检查是否已存在
+        Pointer existingCtx = contextMap.get(finalStationId);
+        if (existingCtx != null) {
+            AtomicInteger count = refCountMap.get(finalStationId);
+            if (count != null) {
+                count.incrementAndGet();
+                logger.debug("复用已存在 Context: stationId={}, refCount={}", finalStationId, count.get());
+            }
+            return existingCtx;
+        }
+
+        // 使用双重检查锁定创建新 Context
+        synchronized (this) {
+            existingCtx = contextMap.get(finalStationId);
+            if (existingCtx != null) {
+                AtomicInteger count = refCountMap.get(finalStationId);
+                if (count != null) {
+                    count.incrementAndGet();
                 }
-                refCountMap.put(id, new AtomicInteger(1));
-                logger.info("创建站点 Context: stationId={}, ptr={}", id, ctx);
+                return existingCtx;
+            }
+
+            Pointer ctx = null;
+            try {
+                ctx = RtklibNative.INSTANCE.rtklib_create_context(finalStationId);
+                if (ctx == null) {
+                    throw new RuntimeException("创建 Context 失败: " + finalStationId);
+                }
+
+                // 先放入 refCountMap，再放入 contextMap，确保追踪成功
+                refCountMap.put(finalStationId, new AtomicInteger(1));
+                contextMap.put(finalStationId, ctx);
+
+                logger.info("创建站点 Context: stationId={}, ptr={}", finalStationId, ctx);
                 return ctx;
+
             } catch (Exception e) {
-                logger.error("创建 Context 异常: stationId={}, error={}", id, e.getMessage());
+                // 创建失败时，立即释放已分配的 native 资源
+                if (ctx != null) {
+                    try {
+                        RtklibNative.INSTANCE.rtklib_destroy_context(ctx);
+                        logger.warn("创建失败后清理 native Context: stationId={}", finalStationId);
+                    } catch (Exception cleanupEx) {
+                        logger.error("清理 native Context 失败: stationId={}, error={}", finalStationId, cleanupEx.getMessage());
+                    }
+                }
+                // 清理可能残留的追踪记录
+                refCountMap.remove(finalStationId);
+                contextMap.remove(finalStationId);
+
+                logger.error("创建 Context 异常: stationId={}, error={}", finalStationId, e.getMessage());
                 throw new RuntimeException("创建 Context 失败", e);
             }
-        });
+        }
     }
 
     /**
@@ -161,22 +201,34 @@ public class RtklibContextManager {
             return;
         }
 
-        int newCount = count.decrementAndGet();
-        if (newCount <= 0) {
-            // 引用计数为0，销毁 Context
-            Pointer ctx = contextMap.remove(stationId);
-            refCountMap.remove(stationId);
-
-            if (ctx != null) {
-                try {
-                    RtklibNative.INSTANCE.rtklib_destroy_context(ctx);
-                    logger.info("销毁站点 Context: stationId={}", stationId);
-                } catch (Exception e) {
-                    logger.error("销毁 Context 异常: stationId={}, error={}", stationId, e.getMessage());
-                }
+        synchronized (this) {
+            count = refCountMap.get(stationId);
+            if (count == null) {
+                return;
             }
-        } else {
-            logger.debug("减少引用计数: stationId={}, refCount={}", stationId, newCount);
+
+            int newCount = count.decrementAndGet();
+            if (newCount <= 0) {
+                // 引用计数为0，销毁 Context
+                Pointer ctx = contextMap.get(stationId);
+
+                // 先销毁 native 资源，再移除追踪记录
+                if (ctx != null) {
+                    try {
+                        RtklibNative.INSTANCE.rtklib_destroy_context(ctx);
+                        logger.info("销毁站点 Context: stationId={}", stationId);
+                    } catch (Exception e) {
+                        logger.error("销毁 Context 异常: stationId={}, error={}", stationId, e.getMessage());
+                        // 即使销毁失败，仍从追踪记录移除，防止重复尝试销毁已损坏的指针
+                    }
+                }
+
+                // 最后移除追踪记录
+                contextMap.remove(stationId);
+                refCountMap.remove(stationId);
+            } else {
+                logger.debug("减少引用计数: stationId={}, refCount={}", stationId, newCount);
+            }
         }
     }
 
@@ -190,16 +242,22 @@ public class RtklibContextManager {
             stationId = "default";
         }
 
-        Pointer ctx = contextMap.remove(stationId);
-        refCountMap.remove(stationId);
+        synchronized (this) {
+            Pointer ctx = contextMap.get(stationId);
 
-        if (ctx != null) {
-            try {
-                RtklibNative.INSTANCE.rtklib_destroy_context(ctx);
-                logger.info("强制销毁站点 Context: stationId={}", stationId);
-            } catch (Exception e) {
-                logger.error("强制销毁 Context 异常: stationId={}, error={}", stationId, e.getMessage());
+            // 先销毁 native 资源
+            if (ctx != null) {
+                try {
+                    RtklibNative.INSTANCE.rtklib_destroy_context(ctx);
+                    logger.info("强制销毁站点 Context: stationId={}", stationId);
+                } catch (Exception e) {
+                    logger.error("强制销毁 Context 异常: stationId={}, error={}", stationId, e.getMessage());
+                }
             }
+
+            // 最后移除追踪记录
+            contextMap.remove(stationId);
+            refCountMap.remove(stationId);
         }
     }
 
@@ -307,19 +365,35 @@ public class RtklibContextManager {
     public void destroyAll() {
         logger.info("正在销毁所有 Context，共 {} 个...", contextMap.size());
 
-        for (Map.Entry<String, Pointer> entry : contextMap.entrySet()) {
-            try {
-                RtklibNative.INSTANCE.rtklib_destroy_context(entry.getValue());
-                logger.info("销毁站点 Context: stationId={}", entry.getKey());
-            } catch (Exception e) {
-                logger.error("销毁 Context 异常: stationId={}, error={}", entry.getKey(), e.getMessage());
+        // 先复制所有 entry，防止遍历时并发修改
+        java.util.List<Map.Entry<String, Pointer>> entries = new java.util.ArrayList<>(contextMap.entrySet());
+
+        int successCount = 0;
+        int failCount = 0;
+
+        for (Map.Entry<String, Pointer> entry : entries) {
+            String stationId = entry.getKey();
+            Pointer ctx = entry.getValue();
+
+            if (ctx != null) {
+                try {
+                    RtklibNative.INSTANCE.rtklib_destroy_context(ctx);
+                    successCount++;
+                    logger.debug("销毁站点 Context: stationId={}", stationId);
+                } catch (Exception e) {
+                    failCount++;
+                    logger.error("销毁 Context 异常: stationId={}, error={}", stationId, e.getMessage());
+                }
             }
         }
 
-        contextMap.clear();
-        refCountMap.clear();
+        // 最后清空追踪记录
+        synchronized (this) {
+            contextMap.clear();
+            refCountMap.clear();
+        }
 
-        logger.info("所有 Context 已销毁");
+        logger.info("所有 Context 已销毁，成功: {}，失败: {}", successCount, failCount);
     }
 
     /**

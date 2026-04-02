@@ -59,6 +59,12 @@ public class GnssAsyncProcessor {
     @Value("${gnss.async.backpressureWaitMs:10}")
     private long backpressureWaitMs;
 
+    @Value("${gnss.async.shutdownTimeoutSec:30}")
+    private int shutdownTimeoutSec;
+
+    @Value("${gnss.async.queueDrainTimeoutSec:10}")
+    private int queueDrainTimeoutSec;
+
     // ==================== 依赖注入 ====================
 
     @Autowired(required = false)
@@ -138,7 +144,7 @@ public class GnssAsyncProcessor {
         // 初始化消费者线程池
         consumerPool = Executors.newFixedThreadPool(consumerThreads, r -> {
             Thread t = new Thread(r, "GNSS-Async-Consumer");
-            t.setDaemon(true);
+            t.setDaemon(false);
             return t;
         });
 
@@ -150,7 +156,7 @@ public class GnssAsyncProcessor {
         // 启动定时刷新任务
         flushScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "GNSS-Flush-Scheduler");
-            t.setDaemon(true);
+            t.setDaemon(false);
             return t;
         });
         flushScheduler.scheduleAtFixedRate(this::flushAll, flushIntervalMs, flushIntervalMs, TimeUnit.MILLISECONDS);
@@ -597,22 +603,75 @@ public class GnssAsyncProcessor {
     public void destroy() {
         logger.info("正在关闭 GNSS 异步处理服务...");
 
+        // 1. 停止接收新任务
         running.set(false);
 
-        // 停止接收新任务
+        // 2. 停止定时刷新任务
         flushScheduler.shutdown();
+
+        // 3. 等待队列清空（带超时）
+        waitForQueueDrain();
+
+        // 4. 关闭消费者线程池
         consumerPool.shutdown();
 
         try {
-            // 等待消费者处理完剩余数据
-            if (!consumerPool.awaitTermination(30, TimeUnit.SECONDS)) {
-                consumerPool.shutdownNow();
+            // 5. 等待消费者线程终止
+            if (!consumerPool.awaitTermination(shutdownTimeoutSec, TimeUnit.SECONDS)) {
+                logger.warn("消费者线程池未在 {} 秒内终止，强制关闭", shutdownTimeoutSec);
+                List<Runnable> unfinishedTasks = consumerPool.shutdownNow();
+                logger.warn("强制关闭后仍有 {} 个任务未执行", unfinishedTasks.size());
             }
+
+            // 6. 等待 flushScheduler 终止
+            if (!flushScheduler.awaitTermination(5, TimeUnit.SECONDS)) {
+                flushScheduler.shutdownNow();
+            }
+
         } catch (InterruptedException e) {
+            logger.warn("关闭过程被中断");
+            Thread.currentThread().interrupt();
             consumerPool.shutdownNow();
+            flushScheduler.shutdownNow();
         }
 
+        // 7. 输出最终统计
         logger.info("GNSS 异步处理服务已关闭，最终统计: {}", getStatistics());
+    }
+
+    /**
+     * 等待队列清空
+     */
+    private void waitForQueueDrain() {
+        long startTime = System.currentTimeMillis();
+        long timeoutMs = queueDrainTimeoutSec * 1000L;
+
+        while (System.currentTimeMillis() - startTime < timeoutMs) {
+            int nmeaPending = nmeaQueue.size();
+            int rtcmPending = rtcmQueue.size();
+            int satObsPending = satObsQueue.size();
+            int solutionPending = gnssSolutionQueue.size();
+
+            if (nmeaPending == 0 && rtcmPending == 0 && satObsPending == 0 && solutionPending == 0) {
+                logger.info("所有队列已清空");
+                return;
+            }
+
+            logger.debug("等待队列清空: NMEA={}, RTCM={}, SatObs={}, Solution={}",
+                    nmeaPending, rtcmPending, satObsPending, solutionPending);
+
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                logger.warn("等待队列清空被中断，剩余数据可能丢失");
+                break;
+            }
+        }
+
+        // 超时后记录剩余数据
+        logger.warn("队列清空超时，剩余数据: NMEA={}, RTCM={}, SatObs={}, Solution={}",
+                nmeaQueue.size(), rtcmQueue.size(), satObsQueue.size(), gnssSolutionQueue.size());
     }
 
     // ==================== 内部任务类 ====================

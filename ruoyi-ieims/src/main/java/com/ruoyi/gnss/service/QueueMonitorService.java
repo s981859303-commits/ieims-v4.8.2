@@ -26,8 +26,6 @@ import java.util.function.Consumer;
  * 6. 阈值配置化
  * </p>
  *
- * @author GNSS Team
- * @date 2026-03-26
  */
 @Service
 public class QueueMonitorService {
@@ -68,6 +66,12 @@ public class QueueMonitorService {
 
     @Value("${gnss.monitor.recoveryNotifyEnabled:true}")
     private boolean recoveryNotifyEnabled;
+
+    @Value("${gnss.monitor.highUsageThreshold:0.5}")
+    private double highUsageThreshold;
+
+    @Value("${gnss.monitor.shutdownTimeoutSec:5}")
+    private int shutdownTimeoutSec;
 
     // ==================== 内部状态 ====================
 
@@ -111,10 +115,11 @@ public class QueueMonitorService {
         if (scheduler != null) {
             scheduler.shutdown();
             try {
-                if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
+                if (!scheduler.awaitTermination(shutdownTimeoutSec, TimeUnit.SECONDS)) {
                     scheduler.shutdownNow();
                 }
             } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
                 scheduler.shutdownNow();
             }
         }
@@ -143,7 +148,7 @@ public class QueueMonitorService {
      * @param stationId   站点ID（可选）
      */
     public void registerQueue(String queueName, BlockingQueue<?> queue, int capacity, String stationId) {
-        QueueState state = new QueueState(queueName, queue, capacity, stationId, speedCheckWindowMs);
+        QueueState state = new QueueState(queueName, queue, capacity, stationId, speedCheckWindowMs, highUsageThreshold);
         queueStates.put(queueName, state);
         logger.info("注册队列监控: {} (容量: {}, 站点: {})", queueName, capacity, stationId != null ? stationId : "全局");
     }
@@ -400,6 +405,84 @@ public class QueueMonitorService {
         alertListeners.remove(listener);
     }
 
+    // ==================== 动态阈值调整 ====================
+
+    /**
+     * 更新告警阈值（运行时动态调整）
+     *
+     * @param warning    警告阈值 (0.0-1.0)
+     * @param critical   严重阈值 (0.0-1.0)
+     * @param emergency  紧急阈值 (0.0-1.0)
+     */
+    public void updateThresholds(double warning, double critical, double emergency) {
+        if (warning < 0 || warning > 1 || critical < 0 || critical > 1 || emergency < 0 || emergency > 1) {
+            throw new IllegalArgumentException("阈值必须在 0.0-1.0 范围内");
+        }
+        if (warning >= critical || critical >= emergency) {
+            throw new IllegalArgumentException("阈值必须满足: warning < critical < emergency");
+        }
+
+        this.warningThreshold = warning;
+        this.criticalThreshold = critical;
+        this.emergencyThreshold = emergency;
+
+        logger.info("告警阈值已更新: warning={}/critical={}/emergency={}",
+                (int)(warning * 100), (int)(critical * 100), (int)(emergency * 100));
+    }
+
+    /**
+     * 更新高使用率阈值（运行时动态调整）
+     *
+     * @param threshold 高使用率阈值 (0.0-1.0)
+     */
+    public void updateHighUsageThreshold(double threshold) {
+        if (threshold < 0 || threshold > 1) {
+            throw new IllegalArgumentException("阈值必须在 0.0-1.0 范围内");
+        }
+
+        this.highUsageThreshold = threshold;
+
+        // 更新所有已注册队列的阈值
+        for (QueueState state : queueStates.values()) {
+            state.highUsageThreshold = threshold;
+        }
+
+        logger.info("高使用率阈值已更新: {}", (int)(threshold * 100));
+    }
+
+    /**
+     * 更新告警冷却时间
+     *
+     * @param cooldownMs 冷却时间（毫秒）
+     */
+    public void updateAlertCooldown(long cooldownMs) {
+        if (cooldownMs < 0) {
+            throw new IllegalArgumentException("冷却时间不能为负数");
+        }
+
+        this.alertCooldownMs = cooldownMs;
+        logger.info("告警冷却时间已更新: {}ms", cooldownMs);
+    }
+
+    /**
+     * 获取当前阈值配置
+     *
+     * @return 阈值配置信息
+     */
+    public Map<String, Object> getThresholdConfig() {
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("warningThreshold", warningThreshold);
+        config.put("criticalThreshold", criticalThreshold);
+        config.put("emergencyThreshold", emergencyThreshold);
+        config.put("highUsageThreshold", highUsageThreshold);
+        config.put("backlogWarningMs", backlogWarningMs);
+        config.put("backlogCriticalMs", backlogCriticalMs);
+        config.put("speedRatioWarning", speedRatioWarning);
+        config.put("alertCooldownMs", alertCooldownMs);
+        config.put("checkIntervalMs", checkIntervalMs);
+        return config;
+    }
+
     // ==================== 统计信息 ====================
 
     /**
@@ -468,7 +551,7 @@ public class QueueMonitorService {
     /**
      * 队列状态内部类
      *
-     * 修复说明：将 speedCheckWindowMs 作为构造函数参数传入，
+     * 修复说明：将 speedCheckWindowMs 和 highUsageThreshold 作为构造函数参数传入，
      * 解决静态内部类无法访问外部类实例字段的问题
      */
     private static class QueueState {
@@ -476,42 +559,40 @@ public class QueueMonitorService {
         final BlockingQueue<?> queue;
         final int capacity;
         final String stationId;
-        final long speedCheckWindowMs;  // 新增：作为实例字段存储
+        final long speedCheckWindowMs;
+        volatile double highUsageThreshold;
 
-        // 当前状态
         volatile int currentSize;
         volatile double currentUsageRatio;
         volatile QueueAlertEvent.Level currentLevel = QueueAlertEvent.Level.INFO;
 
-        // 时间戳
         volatile long highUsageStartTime = 0;
         volatile long lastAlertTime = 0;
 
-        // 计数器
         final AtomicLong totalProduced = new AtomicLong(0);
         final AtomicLong totalConsumed = new AtomicLong(0);
         final AtomicLong totalDropped = new AtomicLong(0);
 
-        // 速率计算
         final ConcurrentLinkedDeque<long[]> produceHistory = new ConcurrentLinkedDeque<>();
         final ConcurrentLinkedDeque<long[]> consumeHistory = new ConcurrentLinkedDeque<>();
 
-        QueueState(String queueName, BlockingQueue<?> queue, int capacity, String stationId, long speedCheckWindowMs) {
+        QueueState(String queueName, BlockingQueue<?> queue, int capacity, String stationId,
+                   long speedCheckWindowMs, double highUsageThreshold) {
             this.queueName = queueName;
             this.queue = queue;
             this.capacity = capacity;
             this.stationId = stationId;
-            this.speedCheckWindowMs = speedCheckWindowMs;  // 初始化
+            this.speedCheckWindowMs = speedCheckWindowMs;
+            this.highUsageThreshold = highUsageThreshold;
         }
 
         void updateSize(int size, double usageRatio) {
             this.currentSize = size;
             this.currentUsageRatio = usageRatio;
 
-            // 跟踪高使用率开始时间
-            if (usageRatio >= 0.5 && highUsageStartTime == 0) {
+            if (usageRatio >= highUsageThreshold && highUsageStartTime == 0) {
                 highUsageStartTime = System.currentTimeMillis();
-            } else if (usageRatio < 0.5) {
+            } else if (usageRatio < highUsageThreshold) {
                 highUsageStartTime = 0;
             }
         }
@@ -561,7 +642,7 @@ public class QueueMonitorService {
         }
 
         long getBacklogDurationMs(long now) {
-            if (highUsageStartTime == 0 || currentUsageRatio < 0.5) {
+            if (highUsageStartTime == 0 || currentUsageRatio < highUsageThreshold) {
                 return 0;
             }
             return now - highUsageStartTime;

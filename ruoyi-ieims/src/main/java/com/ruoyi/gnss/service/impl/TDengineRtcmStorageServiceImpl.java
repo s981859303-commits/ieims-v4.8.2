@@ -6,11 +6,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
-import java.util.Base64;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -22,10 +22,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * </p>
  *
  * <p>
- * 表结构说明：
- * - 超级表：st_sat_obs
- * - 字段：ts、elevation、azimuth、c1、snr1、p1、l1、c2、snr2、p2、l2
- * - 标签：station_id、sat_name
+ * 优化内容：
+ * 1. 废弃 Base64 + NCHAR 存储，改用原生 BINARY 类型直接存储 byte[] 字节流，大幅提升性能与空间利用率
+ * 2. 使用 JdbcTemplate 的预编译参数绑定原生 byte[]，防止截断或语法错误
  * </p>
  */
 @Service
@@ -45,6 +44,10 @@ public class TDengineRtcmStorageServiceImpl implements IRtcmStorageService {
 
     @Resource
     private TDengineUtil tdengineUtil;
+
+    // 引入 Spring 原生的 JdbcTemplate 进行安全的二进制流插入
+    @Resource
+    private JdbcTemplate jdbcTemplate;
 
     /** 缓存的站点ID */
     private String cachedSanitizedStationId;
@@ -72,7 +75,7 @@ public class TDengineRtcmStorageServiceImpl implements IRtcmStorageService {
 
             initTables();
             initialized = true;
-            logger.info("TDengine RTCM 存储服务初始化成功");
+            logger.info("TDengine RTCM 存储服务初始化成功 (二进制原生存储版)");
         } catch (Exception e) {
             logger.error("TDengine RTCM 存储服务初始化失败: {}", e.getMessage());
         }
@@ -85,9 +88,11 @@ public class TDengineRtcmStorageServiceImpl implements IRtcmStorageService {
         tdengineUtil.executeDDL("USE " + database);
 
         // RTCM 原始数据表
+        // 【核心修改】将 NCHAR(4096) 替换为 BINARY(4096) 以存储原生字节流。
+        // （注：如果您使用的是 TDengine 3.x 版本，建议将 BINARY 替换为 VARBINARY）
         String createRtcmStableSql = String.format(
                 "CREATE STABLE IF NOT EXISTS %s (" +
-                        "ts TIMESTAMP, data_len INT, data_base64 NCHAR(4096)" +
+                        "ts TIMESTAMP, data_len INT, raw_data BINARY(4096)" +
                         ") TAGS (station_id VARCHAR(50))",
                 STABLE_RTCM_RAW
         );
@@ -110,20 +115,26 @@ public class TDengineRtcmStorageServiceImpl implements IRtcmStorageService {
 
         try {
             long timestamp = System.currentTimeMillis();
-            String base64Data = Base64.getEncoder().encodeToString(rtcmData);
 
-            String insertSql = String.format(
-                    "INSERT INTO %s (ts, data_len, data_base64) VALUES (?, ?, ?)",
+            // 预编译参数化查询，防止 SQL 注入及二进制字符截断
+            String sql = String.format(
+                    "INSERT INTO %s (ts, data_len, raw_data) VALUES (?, ?, ?)",
                     cachedRtcmTableName
             );
 
-            tdengineUtil.executeUpdate(insertSql, timestamp, rtcmData.length, base64Data);
+            // 【核心修改】直接将 byte[] 传给 JdbcTemplate，底层 JDBC 驱动会自动处理二进制流封装
+            jdbcTemplate.update(sql, timestamp, rtcmData.length, rtcmData);
+
             savedCount.incrementAndGet();
             return true;
 
         } catch (Exception e) {
             failedCount.incrementAndGet();
-            logger.error("存储 RTCM 原始数据失败: {}", e.getMessage());
+            long failCount = failedCount.get();
+            // 降低错误日志打印频率
+            if (failCount % 100 == 1) {
+                logger.error("存储 RTCM 二进制数据失败 [累计失败: {}]: {}", failCount, e.getMessage());
+            }
             return false;
         }
     }

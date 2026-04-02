@@ -5,6 +5,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 
 /**
@@ -13,23 +17,11 @@ import java.time.format.DateTimeFormatter;
  * 功能说明：
  * 1. 解析 GNZDA / GPZDA / BDZDA 语句，提取日期信息
  * 2. 校验 NMEA checksum，确保数据完整性
- * 3. 对异常语句安全失败，不影响主流程
+ * 3. 自动处理 GNSS UTC 时间到本地时区的转换，防止跨天边界切分错误
+ * 4. 对异常语句安全失败，不影响主流程
  *
  * ZDA 语句格式：
  * $GNZDA,hhmmss.ss,dd,mm,yyyy,xx,yy*CC
- *
- * 字段说明：
- * - $GNZDA: 语句类型（GN=多系统, GP=GPS, BD=北斗）
- * - hhmmss.ss: UTC 时间
- * - dd: 日（01-31）
- * - mm: 月（01-12）
- * - yyyy: 年（如 2026）
- * - xx: 时区偏移小时（可选，部分接收机不输出）
- * - yy: 时区偏移分钟（可选，部分接收机不输出）
- * - *CC: 校验和（两位十六进制）
- *
- * @author GNSS Team
- * @date 2026-03-31
  */
 @Component
 public class ZdaParser {
@@ -54,6 +46,9 @@ public class ZdaParser {
     /** 年份合理范围上限 */
     private static final int MAX_YEAR = 2100;
 
+    /** NMEA 语句 checksum 标识符 '*' 的最小合法索引（$TALKER= 至少 6 个字符后才能有 *） */
+    private static final int MIN_STAR_INDEX = 5;
+
     /**
      * 判断是否为 ZDA 语句
      *
@@ -64,7 +59,6 @@ public class ZdaParser {
         if (nmea == null || nmea.isEmpty()) {
             return false;
         }
-        // 使用 toUpperCase 统一处理大小写
         String upper = nmea.toUpperCase();
         return upper.startsWith(PREFIX_GNZDA) ||
                 upper.startsWith(PREFIX_GPZDA) ||
@@ -72,11 +66,11 @@ public class ZdaParser {
     }
 
     /**
-     * 解析 ZDA 语句，提取日期并格式化为指定格式的字符串
+     * 解析 ZDA 语句，将 UTC 时间转换为本地时区后，提取日期并格式化
      *
      * @param nmea      原始 NMEA 语句
      * @param formatter 日期格式化器（如 DateTimeFormatter.ofPattern("yyyy-MM-dd")）
-     * @return 格式化后的日期字符串，解析失败返回 null
+     * @return 转换时区并格式化后的本地日期字符串，解析失败返回 null
      */
     public String parseDate(String nmea, DateTimeFormatter formatter) {
         if (nmea == null || nmea.isEmpty() || formatter == null) {
@@ -98,70 +92,88 @@ public class ZdaParser {
             String[] parts = body.split(",", -1);
 
             if (parts.length < MIN_FIELDS) {
-                logger.debug("ZDA 字段数不足: 期望至少 {} 个, 实际 {} 个",
-                        MIN_FIELDS, parts.length);
+                logger.debug("ZDA 字段数不足: 期望至少 {} 个, 实际 {} 个", MIN_FIELDS, parts.length);
                 return null;
             }
 
-            // 4. 提取日期字段
-            // parts[0] = $GNZDA
-            // parts[1] = hhmmss.ss (UTC 时间)
-            // parts[2] = dd (日)
-            // parts[3] = mm (月)
-            // parts[4] = yyyy (年)
-            String dayStr = parts[2];
-            String monthStr = parts[3];
-            String yearStr = parts[4];
+            // 4. 提取时间与日期字段
+            String timeStr = parts[1]; // hhmmss.ss
+            String dayStr = parts[2];  // dd
+            String monthStr = parts[3]; // mm
+            String yearStr = parts[4]; // yyyy
 
-            // 5. 校验字段非空
+            // 5. 校验日期字段非空
             if (isEmptyField(dayStr) || isEmptyField(monthStr) || isEmptyField(yearStr)) {
-                logger.debug("ZDA 日期字段为空: day='{}', month='{}', year='{}'",
-                        dayStr, monthStr, yearStr);
+                logger.debug("ZDA 日期字段为空: day='{}', month='{}', year='{}'", dayStr, monthStr, yearStr);
                 return null;
             }
 
-            // 6. 解析数字
+            // 6. 解析年月日数字
             int day = parsePositiveInt(dayStr);
             int month = parsePositiveInt(monthStr);
             int year = parsePositiveInt(yearStr);
 
             if (day < 0 || month < 0 || year < 0) {
-                logger.debug("ZDA 日期字段包含非法数字: day='{}', month='{}', year='{}'",
-                        dayStr, monthStr, yearStr);
+                logger.debug("ZDA 日期字段包含非法数字: day='{}', month='{}', year='{}'", dayStr, monthStr, yearStr);
                 return null;
             }
 
             // 7. 范围校验
             if (year < MIN_YEAR || year > MAX_YEAR) {
-                logger.debug("ZDA 年份超出合理范围: {} (有效范围: {}-{})",
-                        year, MIN_YEAR, MAX_YEAR);
+                logger.debug("ZDA 年份超出合理范围: {} (有效范围: {}-{})", year, MIN_YEAR, MAX_YEAR);
                 return null;
             }
-
             if (month < 1 || month > 12) {
                 logger.debug("ZDA 月份超出范围: {} (有效范围: 1-12)", month);
                 return null;
             }
-
             if (day < 1 || day > 31) {
                 logger.debug("ZDA 日期超出范围: {} (有效范围: 1-31)", day);
                 return null;
             }
 
-            // 8. 使用 LocalDate 进行严格日期校验（自动处理闰年、各月天数等）
-            LocalDate date;
+            // 8. 解析时分秒 (UTC时间)
+            int hour = 0, minute = 0, second = 0;
+            if (!isEmptyField(timeStr) && timeStr.length() >= 6) {
+                try {
+                    hour = Integer.parseInt(timeStr.substring(0, 2));
+                    minute = Integer.parseInt(timeStr.substring(2, 4));
+                    second = Integer.parseInt(timeStr.substring(4, 6));
+                    
+                    if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
+                        logger.debug("ZDA 时间字段超出有效范围: hour={}, minute={}, second={} (使用默认值 00:00:00)", hour, minute, second);
+                        hour = 0;
+                        minute = 0;
+                        second = 0;
+                    }
+                } catch (NumberFormatException e) {
+                    logger.debug("ZDA 时间字段解析失败，使用默认值 00:00:00: {}", timeStr);
+                }
+            }
+
+            // 9. 核心修复：组装 UTC 绝对时间并转换为本地时区
+            LocalDate utcDate;
+            LocalTime utcTime;
             try {
-                date = LocalDate.of(year, month, day);
+                utcDate = LocalDate.of(year, month, day);
+                utcTime = LocalTime.of(hour, minute, second);
+
+                // 组合为标准 UTC 时间
+                ZonedDateTime utcZonedDateTime = ZonedDateTime.of(utcDate, utcTime, ZoneOffset.UTC);
+
+                // 转换为系统所在时区的本地时间 (如系统在东八区/东九区，会自动加上 8/9 小时并处理进位)
+                ZonedDateTime localZonedDateTime = utcZonedDateTime.withZoneSameInstant(ZoneId.systemDefault());
+
+                // 10. 基于转换后的本地时间进行格式化输出
+                return localZonedDateTime.format(formatter);
+
             } catch (Exception e) {
-                logger.debug("ZDA 日期非法: {}-{}-{} ({})", year, month, day, e.getMessage());
+                logger.debug("ZDA 日期/时间重组异常: {}-{}-{} {}:{}:{} ({})",
+                        year, month, day, hour, minute, second, e.getMessage());
                 return null;
             }
 
-            // 9. 格式化输出
-            return date.format(formatter);
-
         } catch (Exception e) {
-            // 捕获所有未预期的异常，确保不影响主流程
             logger.debug("ZDA 解析异常（不影响主流程）: {}", e.getMessage());
             return null;
         }
@@ -169,13 +181,6 @@ public class ZdaParser {
 
     /**
      * 校验 NMEA checksum
-     * <p>
-     * NMEA checksum 计算规则：
-     * - 对 $ 和 * 之间的所有字符（不含 $ 和 *）进行异或运算
-     * - 结果为两位十六进制数，附加在 * 之后
-     *
-     * @param nmea 原始 NMEA 语句
-     * @return true 如果 checksum 有效
      */
     public boolean validateChecksum(String nmea) {
         if (nmea == null || nmea.isEmpty()) {
@@ -183,24 +188,20 @@ public class ZdaParser {
         }
 
         int starIndex = nmea.indexOf('*');
-        if (starIndex < 0) {
-            // 没有 * 号，无法校验
+        if (starIndex < MIN_STAR_INDEX) {
             return false;
         }
 
-        // * 后面至少需要 2 个十六进制字符
         if (starIndex + 3 > nmea.length()) {
             return false;
         }
 
         try {
-            // 计算 $ 和 * 之间字符的 XOR
             int calculated = 0;
             for (int i = 1; i < starIndex; i++) {
                 calculated ^= (nmea.charAt(i) & 0xFF);
             }
 
-            // 提取语句中的 checksum
             String expectedHex = String.format("%02X", calculated);
             String actualHex = nmea.substring(starIndex + 1, starIndex + 3).toUpperCase();
 
@@ -220,8 +221,6 @@ public class ZdaParser {
 
     /**
      * 安全解析正整数
-     *
-     * @return 解析结果，失败返回 -1
      */
     private int parsePositiveInt(String value) {
         if (value == null || value.isEmpty()) {
@@ -235,7 +234,7 @@ public class ZdaParser {
     }
 
     /**
-     * 截断字符串用于日志输出，避免日志过长
+     * 截断字符串用于日志输出
      */
     private String truncateForLog(String s) {
         if (s == null) return "null";
