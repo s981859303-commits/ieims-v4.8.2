@@ -2,69 +2,88 @@ package com.ruoyi.gnss.service;
 
 import com.ruoyi.gnss.domain.SatObservation;
 
+import java.time.LocalDate;
 import java.util.List;
 
 /**
- * 卫星观测数据存储服务接口
+ * 卫星观测数据存储服务接口（增强版 - 支持日期字段）
  *
- * 功能说明：
- * 1. 定义卫星观测数据存储的标准接口
- * 2. 支持多种存储后端实现（TDengine、InfluxDB 等）
- * 3. 遵循依赖倒置原则
+ * 功能：
+ * 1. 保存卫星观测数据到 TDengine
+ * 2. 按时间范围查询观测数据
+ * 3. 按日期查询观测数据
+ * 4. 按唯一键查询观测数据
+ * 5. 删除指定时间范围的数据
+ * 6. 获取统计信息
+ *
+ * 【重构说明】
+ * 1. 新增按日期查询方法
+ * 2. 新增按唯一键查询方法
+ * 3. 支持批量插入优化
  *
  * @author GNSS Team
- * @date 2026-03-25
+ * @version 2.0 - 2026-04-02 添加日期查询支持
  */
 public interface ISatObservationStorageService {
 
     /**
-     * 检查服务是否已初始化
-     *
-     * @return true 表示已初始化
-     */
-    boolean isInitialized();
-
-    /**
      * 保存单条卫星观测数据
      *
-     * @param observation 卫星观测数据
-     * @return true 表示保存成功
+     * @param stationId   站点ID
+     * @param observation 观测数据
      */
-    boolean saveSatObservation(SatObservation observation);
+    void saveSatObservation(String stationId, SatObservation observation);
 
     /**
      * 批量保存卫星观测数据
      *
-     * @param observations 卫星观测数据列表
-     * @return 成功保存的数量
+     * @param stationId    站点ID
+     * @param observations 观测数据列表
      */
-    int saveSatObservationBatch(List<SatObservation> observations);
+    void saveSatObservationBatch(String stationId, List<SatObservation> observations);
 
     /**
-     * 批量保存卫星观测数据（指定站点）
+     * 按时间范围查询观测数据
      *
      * @param stationId 站点ID
-     * @param observations 卫星观测数据列表
-     * @return 成功保存的数量
+     * @param startTime 开始时间（毫秒时间戳）
+     * @param endTime   结束时间（毫秒时间戳）
+     * @return 观测数据列表
      */
-    int saveSatObservationBatch(String stationId, List<SatObservation> observations);
+    List<SatObservation> queryByTimeRange(String stationId, long startTime, long endTime);
 
     /**
-     * 异步批量保存卫星观测数据
+     * 按日期查询观测数据
      *
-     * @param observations 卫星观测数据列表
+     * @param stationId 站点ID
+     * @param date      观测日期
+     * @return 观测数据列表
      */
-    default void saveSatObservationBatchAsync(List<SatObservation> observations) {
-        // 默认实现：同步调用
-        saveSatObservationBatch(observations);
-    }
+    List<SatObservation> queryByDate(String stationId, LocalDate date);
 
     /**
-     * 获取待处理数据数量
+     * 按唯一键查询观测数据
      *
-     * @return 待处理数据数量
+     * @param stationId    站点ID
+     * @param obsUniqueKey 唯一键（格式：日期_时间_卫星编号）
+     * @return 观测数据，不存在返回 null
      */
-    default int getPendingCount() {
-        return 0;
-    }
+    SatObservation queryByUniqueKey(String stationId, String obsUniqueKey);
+
+    /**
+     * 删除指定时间范围的数据
+     *
+     * @param stationId 站点ID
+     * @param startTime 开始时间（毫秒时间戳）
+     * @param endTime   结束时间（毫秒时间戳）
+     * @return 删除条数
+     */
+    int deleteByTimeRange(String stationId, long startTime, long endTime);
+
+    /**
+     * 获取统计信息
+     *
+     * @return 统计信息字符串
+     */
+    String getStatistics();
 }

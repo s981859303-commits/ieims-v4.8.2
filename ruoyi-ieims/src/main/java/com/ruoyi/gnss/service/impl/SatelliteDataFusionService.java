@@ -4,10 +4,7 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.ruoyi.gnss.domain.GsvSatelliteData;
 import com.ruoyi.gnss.domain.SatObservation;
-import com.ruoyi.gnss.service.GsvParser;
-import com.ruoyi.gnss.service.ISatObservationStorageService;
-import com.ruoyi.gnss.service.SatNoConverter;
-import com.ruoyi.gnss.service.StationContext;
+import com.ruoyi.gnss.service.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -15,354 +12,494 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.PostConstruct;
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.*;
 
 /**
- * 卫星观测数据融合服务 (Caffeine TTL 安全版)
+ * 卫星数据融合服务（
  *
- * 功能说明：
- * 1. 缓存 GSV 数据（仰角、方位角、信噪比），支持 5秒自动过期，防止内存泄漏。
- * 2. 缓存 RTCM 解算数据（伪距、相位），支持 5秒自动过期。
- * 3. 按"历元时间+卫星编号"融合数据
- * 4. 批量写入 TDengine
+ * 功能：
+ * 1. 缓存 GSV 数据（仰角、方位角、信噪比）
+ * 2. 缓存 RTCM 数据（伪距、相位）
+ * 3. 融合 GSV + RTCM 数据，生成完整观测记录
+ * 4. 【新增】关联 ZDA 日期，生成完整时间戳
+ * 5. 【新增】处理跨天、日期缺失等边界场景
  *
- * @author GNSS Team
+ * 数据融合策略：
+ * - 以"历元时间 + 卫星编号 + 日期"为键进行融合
+ * - GSV 数据有效期：60秒
+ * - RTCM 数据有效期：60秒
+ * - ZDA 日期缓存：按站点隔离
+ *
+ * @version 2.0 - 2026-04-02 添加ZDA日期关联支持
  */
 @Service
 public class SatelliteDataFusionService {
 
     private static final Logger logger = LoggerFactory.getLogger(SatelliteDataFusionService.class);
 
-    // ==================== 缓存键分隔符 ====================
-    private static final String KEY_SEPARATOR = ":";
+    // ==================== 常量定义 ====================
 
-    // ==================== 数据缓存 (支持多站点，引入 TTL) ====================
+    /** GSV 数据缓存过期时间（秒） */
+    private static final int GSV_CACHE_EXPIRE_SECONDS = 60;
 
-    // 【核心修复】引入 Caffeine 替代 ConcurrentHashMap，利用 5 秒 TTL 自动淘汰陈旧数据
-    // 彻底解决强制清空导致的异步时间差丢失数据问题
-    private final Cache<String, GsvSatelliteData> gsvCache = Caffeine.newBuilder()
-            .maximumSize(10000)
-            .expireAfterWrite(5, TimeUnit.SECONDS)
-            .build();
+    /** RTCM 数据缓存过期时间（秒） */
+    private static final int RTCM_CACHE_EXPIRE_SECONDS = 60;
 
-    private final Cache<String, RtcmObsData> rtcmCache = Caffeine.newBuilder()
-            .maximumSize(10000)
-            .expireAfterWrite(5, TimeUnit.SECONDS)
-            .build();
+    /** ZDA 日期缓存过期时间（小时） */
+    private static final int ZDA_DATE_CACHE_EXPIRE_HOURS = 24;
 
-    private final ConcurrentHashMap<String, AtomicLong> stationLastFusionTime = new ConcurrentHashMap<>();
+    /** 历元时间匹配容差（毫秒） */
+    private static final long EPOCH_TIME_TOLERANCE_MS = 1000;
 
-    // 隔离存放各个站点的当前历元时间
-    private final ConcurrentHashMap<String, Long> stationEpochTimes = new ConcurrentHashMap<>();
+    /** 批量入库阈值 */
+    private static final int BATCH_INSERT_THRESHOLD = 10;
 
-    // ==================== 配置参数 ====================
-
-    @Value("${gnss.fusion.intervalMs:1000}")
-    private long fusionIntervalMs;
-
-    @Value("${gnss.fusion.epochTimeoutMs:2000}")
-    private long epochTimeoutMs;
-
-    @Value("${gnss.fusion.cacheMaxSize:10000}")
-    private int cacheMaxSize;
+    /** 批量入库超时（毫秒） */
+    private static final long BATCH_INSERT_TIMEOUT_MS = 5000;
 
     // ==================== 依赖注入 ====================
 
     @Autowired(required = false)
-    private GsvParser gsvParser;
+    private GnssAsyncProcessor asyncProcessor;
 
     @Autowired(required = false)
     private ISatObservationStorageService storageService;
 
+    @Value("${gnss.fusion.batchSize:100}")
+    private int batchSize;
+
+    @Value("${gnss.fusion.enabled:true}")
+    private boolean fusionEnabled;
+
+    // ==================== 缓存定义 ====================
+
+    /** GSV 数据缓存：key = stationId_satNo, value = GsvSatelliteData */
+    private Cache<String, GsvSatelliteData> gsvCache;
+
+    /** RTCM 数据缓存：key = stationId_satNo, value = RtcmObsData */
+    private Cache<String, RtcmObsData> rtcmCache;
+
+    /** ZDA 日期缓存：key = stationId, value = ZdaDateCache */
+    private Cache<String, ZdaDateCache> zdaDateCache;
+
+    /** 待入库观测数据队列 */
+    private final ConcurrentHashMap<String, List<SatObservation>> pendingObservations = new ConcurrentHashMap<>();
+
+    /** 批量入库定时器 */
+    private ScheduledExecutorService batchExecutor;
+
+    // ==================== 初始化 ====================
+
     @PostConstruct
     public void init() {
-        logger.info("卫星数据融合服务初始化完成（Caffeine TTL 安全版），融合间隔: {}ms, 最大缓存: {}", fusionIntervalMs, cacheMaxSize);
+        // 初始化 GSV 缓存
+        gsvCache = Caffeine.newBuilder()
+                .expireAfterWrite(GSV_CACHE_EXPIRE_SECONDS, TimeUnit.SECONDS)
+                .maximumSize(10000)
+                .recordStats()
+                .build();
+
+        // 初始化 RTCM 缓存
+        rtcmCache = Caffeine.newBuilder()
+                .expireAfterWrite(RTCM_CACHE_EXPIRE_SECONDS, TimeUnit.SECONDS)
+                .maximumSize(10000)
+                .recordStats()
+                .build();
+
+        // 初始化 ZDA 日期缓存
+        zdaDateCache = Caffeine.newBuilder()
+                .expireAfterWrite(ZDA_DATE_CACHE_EXPIRE_HOURS, TimeUnit.HOURS)
+                .maximumSize(1000)
+                .build();
+
+        // 启动批量入库定时器
+        batchExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "SatObs-Batch-Executor");
+            t.setDaemon(true);
+            return t;
+        });
+        batchExecutor.scheduleWithFixedDelay(this::flushPendingObservations,
+                BATCH_INSERT_TIMEOUT_MS, BATCH_INSERT_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+
+        logger.info("SatelliteDataFusionService 初始化完成，批量大小: {}, 融合开关: {}",
+                batchSize, fusionEnabled);
     }
 
-    // ==================== 复合键生成 ====================
+    // ==================== 公共接口 ====================
 
-    private String buildCacheKey(String stationId, String satNo) {
-        return stationId + KEY_SEPARATOR + satNo;
-    }
-
-    private String extractSatNo(String key) {
-        int idx = key.indexOf(KEY_SEPARATOR);
-        return idx > 0 ? key.substring(idx + 1) : key;
-    }
-
-    // ==================== 数据处理方法 ====================
-
-    public void processGsvData(String gsvLine) {
-        processGsvData(StationContext.getCurrentStationId(), gsvLine);
-    }
-
-    public void processGsvData(String stationId, String gsvLine) {
-        if (gsvParser == null || gsvLine == null) {
+    /**
+     * 更新站点的 ZDA 日期
+     *
+     * @param stationId 站点ID
+     * @param date      日期
+     * @param time      时间
+     * @param timestamp 时间戳
+     */
+    public void updateZdaDate(String stationId, LocalDate date, LocalTime time, long timestamp) {
+        if (stationId == null || date == null) {
             return;
         }
-        try {
-            List<GsvSatelliteData> satList = gsvParser.parseGsv(gsvLine);
-            for (GsvSatelliteData data : satList) {
-                if (data.getSatNo() != null) {
-                    // Caffeine 自动维护 max size 和 expire，无需手动校验
-                    gsvCache.put(buildCacheKey(stationId, data.getSatNo()), data);
-                }
-            }
-        } catch (Exception e) {
-            logger.error("处理 GSV 数据异常: {}", e.getMessage());
+
+        ZdaDateCache cache = zdaDateCache.get(stationId, k -> new ZdaDateCache());
+        LocalDate oldDate = cache.date;
+
+        cache.date = date;
+        cache.time = time;
+        cache.timestamp = timestamp;
+        cache.source = "ZDA";
+
+        if (oldDate != null && !oldDate.equals(date)) {
+            logger.info("站点 {} ZDA日期变更: {} -> {}", stationId, oldDate, date);
         }
-    }
 
-    public void processRtcmData(String satId, int rtcmMessageType,
-                                Double p1, Double p2, Double l1, Double l2,
-                                Double snr, String c1, String c2) {
-        processRtcmData(StationContext.getCurrentStationId(), satId, rtcmMessageType,
-                p1, p2, l1, l2, snr, c1, c2);
-    }
-
-    public void processRtcmData(String stationId, String satId, int rtcmMessageType,
-                                Double p1, Double p2, Double l1, Double l2,
-                                Double snr, String c1, String c2) {
-        if (satId == null) {
-            return;
-        }
-        try {
-            String satNo = SatNoConverter.fromRtcmSatId(satId, rtcmMessageType);
-            RtcmObsData data = new RtcmObsData();
-            data.setSatNo(satNo);
-            data.setSatSystem(SatNoConverter.getSatSystem(satNo));
-            data.setPseudorangeP1(p1);
-            data.setPseudorangeP2(p2);
-            data.setPhaseL1(l1);
-            data.setPhaseL2(l2);
-            data.setSnr(snr);
-            data.setC1(c1);
-            data.setC2(c2);
-            data.setTimestamp(System.currentTimeMillis());
-
-            // Caffeine 自动维护，直接 Put
-            rtcmCache.put(buildCacheKey(stationId, satNo), data);
-
-        } catch (Exception e) {
-            logger.error("处理 RTCM 数据异常: {}", e.getMessage());
-        }
+        logger.debug("站点 {} ZDA日期更新: {} {}", stationId, date, time);
     }
 
     /**
-     * 设置当前历元时间（多站点隔离）
+     * 处理 GSV 数据
+     *
+     * @param stationId 站点ID
+     * @param satellites 卫星数据列表
+     * @param epochTime  历元时间
+     * @param obsDate    观测日期（来自ZDA）
+     * @param dateSource 日期来源
      */
-    public void setEpochTime(String stationId, Long epochTime) {
-        if (stationId != null && epochTime != null) {
-            stationEpochTimes.put(stationId, epochTime);
+    public void processGsvData(String stationId, List<GsvSatelliteData> satellites,
+                               long epochTime, LocalDate obsDate, String dateSource) {
+        if (!fusionEnabled || satellites == null || satellites.isEmpty()) {
+            return;
         }
+
+        // 获取站点日期
+        LocalDate effectiveDate = getEffectiveDate(stationId, obsDate, dateSource);
+
+        for (GsvSatelliteData sat : satellites) {
+            String cacheKey = buildCacheKey(stationId, sat.getSatNo());
+
+            // 缓存 GSV 数据
+            gsvCache.put(cacheKey, sat);
+
+            // 尝试融合
+            tryFuseAndSave(stationId, sat.getSatNo(), epochTime, effectiveDate, dateSource);
+        }
+
+        logger.debug("站点 {} 处理 GSV 数据: {} 颗卫星, 日期={}",
+                stationId, satellites.size(), effectiveDate);
     }
 
     /**
-     * 兼容老代码的入口，默认使用 ThreadLocal 中的 stationId
+     * 处理 RTCM 数据
+     *
+     * @param stationId 站点ID
+     * @param obsArray  观测数据数组
+     * @param epochTime 历元时间
+     * @param obsDate   观测日期（来自ZDA）
+     * @param dateSource 日期来源
      */
-    public void setEpochTime(Long epochTime) {
-        setEpochTime(StationContext.getCurrentStationId(), epochTime);
+    public void processRtcmData(String stationId, RtklibNative.JavaObs[] obsArray,
+                                Long epochTime, LocalDate obsDate, String dateSource) {
+        if (!fusionEnabled || obsArray == null || obsArray.length == 0) {
+            return;
+        }
+
+        // 获取站点日期
+        LocalDate effectiveDate = getEffectiveDate(stationId, obsDate, dateSource);
+        long effectiveEpochTime = epochTime != null ? epochTime : System.currentTimeMillis();
+
+        for (RtklibNative.JavaObs obs : obsArray) {
+            String satNo = SatNoConverter.convert(obs.sys, obs.prn);
+            String cacheKey = buildCacheKey(stationId, satNo);
+
+            // 缓存 RTCM 数据
+            RtcmObsData rtcmData = new RtcmObsData();
+            rtcmData.satNo = satNo;
+            rtcmData.satSystem = getSatSystemName(obs.sys);
+            rtcmData.pseudorangeP1 = obs.P[0];
+            rtcmData.phaseL1 = obs.L[0];
+            rtcmData.snr1 = obs.SNR[0];
+            rtcmData.pseudorangeP2 = obs.P[1];
+            rtcmData.phaseP2 = obs.L[1];
+            rtcmData.snr2 = obs.SNR[1];
+            rtcmData.code1 = obs.code[0];
+            rtcmData.code2 = obs.code[1];
+            rtcmData.epochTime = effectiveEpochTime;
+            rtcmCache.put(cacheKey, rtcmData);
+
+            // 尝试融合
+            tryFuseAndSave(stationId, satNo, effectiveEpochTime, effectiveDate, dateSource);
+        }
+
+        logger.debug("站点 {} 处理 RTCM 数据: {} 个观测值, 日期={}",
+                stationId, obsArray.length, effectiveDate);
     }
 
-    // ==================== 数据融合与入库 ====================
+    /**
+     * 尝试融合并保存数据
+     */
+    private void tryFuseAndSave(String stationId, String satNo, long epochTime,
+                                LocalDate obsDate, String dateSource) {
+        String cacheKey = buildCacheKey(stationId, satNo);
 
-    public int fuseAndStore() {
-        return fuseAndStore(StationContext.getCurrentStationId());
-    }
+        // 获取 GSV 数据
+        GsvSatelliteData gsvData = gsvCache.getIfPresent(cacheKey);
 
-    public int fuseAndStore(String stationId) {
-        if (storageService == null || !storageService.isInitialized()) {
-            return 0; // 删除了清空缓存的逻辑，交由 TTL 管理
-        }
+        // 获取 RTCM 数据
+        RtcmObsData rtcmData = rtcmCache.getIfPresent(cacheKey);
 
-        long now = System.currentTimeMillis();
-
-        AtomicLong lastFusionTime = stationLastFusionTime.computeIfAbsent(
-                stationId, k -> new AtomicLong(0));
-
-        long lastTime = lastFusionTime.get();
-        if (now - lastTime < fusionIntervalMs) {
-            return 0;
-        }
-
-        if (!lastFusionTime.compareAndSet(lastTime, now)) {
-            return 0;
-        }
-
-        try {
-            List<SatObservation> observations = fuseData(stationId, now);
-
-            if (observations.isEmpty()) {
-                return 0;
-            }
-
-            int savedCount = storageService.saveSatObservationBatch(stationId, observations);
-
-            // =================================================================
-            // 【核心修复点】不再调用 clearCacheForStation(stationId);
-            // 将陈旧数据的清理彻底交给 Caffeine 的 5秒 TTL 控制。
-            // 如此便可保证只有 RTCM 还没收到 GSV 的卫星平稳等待下一个包到达，防止被误删！
-            // =================================================================
-
-            return savedCount;
-
-        } catch (Exception e) {
-            logger.error("数据融合入库异常: {}", e.getMessage());
-            return 0;
-        }
-    }
-
-    private List<SatObservation> fuseData(String stationId, long timestamp) {
-        Set<String> stationSatNos = new HashSet<>();
-        String prefix = stationId + KEY_SEPARATOR;
-
-        // 适配 Caffeine Map 获取方式
-        for (String key : gsvCache.asMap().keySet()) {
-            if (key.startsWith(prefix)) {
-                stationSatNos.add(extractSatNo(key));
-            }
-        }
-        for (String key : rtcmCache.asMap().keySet()) {
-            if (key.startsWith(prefix)) {
-                stationSatNos.add(extractSatNo(key));
-            }
-        }
-
-        if (stationSatNos.isEmpty()) {
-            return Collections.emptyList();
-        }
-
-        List<SatObservation> result = new ArrayList<>(stationSatNos.size());
-
-        for (String satNo : stationSatNos) {
-            SatObservation obs = fuseSatelliteData(stationId, satNo, timestamp);
-            if (obs != null) {
-                result.add(obs);
-            }
-        }
-
-        return result;
-    }
-
-    private SatObservation fuseSatelliteData(String stationId, String satNo, long timestamp) {
-        String key = buildCacheKey(stationId, satNo);
-        // 适配 Caffeine 获取单个值
-        GsvSatelliteData gsvData = gsvCache.getIfPresent(key);
-        RtcmObsData rtcmData = rtcmCache.getIfPresent(key);
-
+        // 检查是否可以融合
         if (gsvData == null && rtcmData == null) {
-            return null;
+            return;
         }
 
+        // 检查历元时间是否匹配（如果两边都有）
+        if (gsvData != null && rtcmData != null) {
+            long gsvTime = gsvData.getEpochTime() != null ? gsvData.getEpochTime() : 0;
+            long rtcmTime = rtcmData.epochTime;
+            if (Math.abs(gsvTime - rtcmTime) > EPOCH_TIME_TOLERANCE_MS) {
+                logger.debug("站点 {} 卫星 {} 历元时间不匹配: GSV={}, RTCM={}",
+                        stationId, satNo, gsvTime, rtcmTime);
+                // 使用较新的数据
+                epochTime = Math.max(gsvTime, rtcmTime);
+            }
+        }
+
+        // 构建融合后的观测数据
+        SatObservation observation = buildObservation(
+                stationId, satNo, epochTime, obsDate, dateSource, gsvData, rtcmData);
+
+        if (observation != null) {
+            addToPendingList(stationId, observation);
+        }
+    }
+
+    /**
+     * 构建观测数据对象
+     */
+    private SatObservation buildObservation(String stationId, String satNo, long epochTime,
+                                            LocalDate obsDate, String dateSource,
+                                            GsvSatelliteData gsvData, RtcmObsData rtcmData) {
         SatObservation obs = new SatObservation();
-        obs.setTimestamp(timestamp);
 
-        // 从映射表中取得对应站点的历元时间
-        obs.setEpochTime(stationEpochTimes.get(stationId));
-
+        // 设置基础信息
+        obs.setTimestamp(System.currentTimeMillis());
+        obs.setEpochTime(epochTime);
         obs.setSatNo(satNo);
-        obs.setSatSystem(SatNoConverter.getSatSystem(satNo));
+        obs.setStationId(stationId);
 
+        // 【关键】设置日期信息
+        obs.setObservationDate(obsDate);
+        obs.setObsTime(epochTimeToTime(epochTime));
+        obs.setDateSource(dateSource);
+
+        // 计算唯一键
+        obs.calculateObsUniqueKey();
+
+        // 计算完整时间戳
+        obs.calculateFullTimestamp();
+
+        // 设置 GSV 数据
         if (gsvData != null) {
+            obs.setSatSystem(gsvData.getSatSystem());
             obs.setElevation(gsvData.getElevation());
             obs.setAzimuth(gsvData.getAzimuth());
             obs.setSnr(gsvData.getSnr());
         }
 
+        // 设置 RTCM 数据
         if (rtcmData != null) {
-            obs.setPseudorangeP1(rtcmData.getPseudorangeP1());
-            obs.setPhaseL1(rtcmData.getPhaseL1());
-            obs.setPseudorangeP2(rtcmData.getPseudorangeP2());
-            obs.setPhaseP2(rtcmData.getPhaseL2());
-            obs.setC1(rtcmData.getC1());
-            obs.setC2(rtcmData.getC2());
-
-            if (rtcmData.getSnr() != null && rtcmData.getSnr() > 0) {
-                obs.setSnr(rtcmData.getSnr());
+            obs.setSatSystem(rtcmData.satSystem);
+            obs.setPseudorangeP1(rtcmData.pseudorangeP1);
+            obs.setPhaseL1(rtcmData.phaseL1);
+            obs.setPseudorangeP2(rtcmData.pseudorangeP2);
+            obs.setPhaseP2(rtcmData.phaseP2);
+            obs.setC1(rtcmData.code1);
+            obs.setC2(rtcmData.code2);
+            // 如果 GSV 没有信噪比，使用 RTCM 的
+            if (gsvData == null || gsvData.getSnr() == null) {
+                obs.setSnr(rtcmData.snr1);
             }
         }
 
-        obs.setDataSource(determineDataSource(gsvData, rtcmData));
+        // 设置数据来源标记
+        String dataSource = "";
+        if (gsvData != null) dataSource += "GSV";
+        if (rtcmData != null) dataSource += (dataSource.isEmpty() ? "RTCM" : "+RTCM");
+        obs.setDataSource(dataSource);
 
         return obs;
     }
 
-    private String determineDataSource(GsvSatelliteData gsvData, RtcmObsData rtcmData) {
-        if (gsvData != null && rtcmData != null) {
-            return "FUSED";
-        } else if (gsvData != null) {
-            return "GSV";
-        } else if (rtcmData != null) {
-            return "RTCM";
+    /**
+     * 获取有效日期
+     */
+    private LocalDate getEffectiveDate(String stationId, LocalDate providedDate, String dateSource) {
+        // 如果提供了日期，直接使用
+        if (providedDate != null) {
+            return providedDate;
         }
-        return "UNKNOWN";
+
+        // 从缓存获取
+        ZdaDateCache cache = zdaDateCache.getIfPresent(stationId);
+        if (cache != null && cache.date != null) {
+            return cache.date;
+        }
+
+        // 使用系统日期
+        LocalDate systemDate = LocalDate.now();
+        logger.warn("站点 {} 未获取到ZDA日期，使用系统日期: {}", stationId, systemDate);
+        return systemDate;
     }
 
-    // ==================== 缓存管理 ====================
-
-    public void clearCacheForStation(String stationId) {
-        String prefix = stationId + KEY_SEPARATOR;
-        gsvCache.asMap().keySet().removeIf(key -> key.startsWith(prefix));
-        rtcmCache.asMap().keySet().removeIf(key -> key.startsWith(prefix));
-        // 对于长时间不连的基站可以清理一下历元时间，防止小量泄露
-        // stationEpochTimes.remove(stationId);
+    /**
+     * 历元时间转换为 LocalTime
+     */
+    private LocalTime epochTimeToTime(long epochTimeMs) {
+        // 历元时间是一天内的毫秒数
+        long msInDay = epochTimeMs % (24 * 60 * 60 * 1000);
+        return LocalTime.ofNanoOfDay(msInDay * 1_000_000);
     }
 
-    public void clearCache() {
-        gsvCache.invalidateAll();
-        rtcmCache.invalidateAll();
-        stationEpochTimes.clear();
+    /**
+     * 添加到待入库列表
+     */
+    private void addToPendingList(String stationId, SatObservation observation) {
+        List<SatObservation> list = pendingObservations.computeIfAbsent(
+                stationId, k -> Collections.synchronizedList(new ArrayList<>()));
+
+        list.add(observation);
+
+        // 达到批量阈值时触发入库
+        if (list.size() >= batchSize) {
+            flushPendingObservations(stationId);
+        }
     }
 
-    public int getGsvCacheSize() {
-        return (int) gsvCache.estimatedSize();
+    /**
+     * 刷新所有待入库数据
+     */
+    private void flushPendingObservations() {
+        for (String stationId : pendingObservations.keySet()) {
+            flushPendingObservations(stationId);
+        }
     }
 
-    public int getRtcmCacheSize() {
-        return (int) rtcmCache.estimatedSize();
+    /**
+     * 刷新指定站点的待入库数据
+     */
+    private void flushPendingObservations(String stationId) {
+        List<SatObservation> list = pendingObservations.get(stationId);
+        if (list == null || list.isEmpty()) {
+            return;
+        }
+
+        // 取出当前列表
+        List<SatObservation> toSave;
+        synchronized (list) {
+            if (list.isEmpty()) {
+                return;
+            }
+            toSave = new ArrayList<>(list);
+            list.clear();
+        }
+
+        // 去重（按唯一键）
+        Map<String, SatObservation> uniqueMap = new LinkedHashMap<>();
+        for (SatObservation obs : toSave) {
+            uniqueMap.put(obs.getObsUniqueKey(), obs);
+        }
+        List<SatObservation> uniqueList = new ArrayList<>(uniqueMap.values());
+
+        // 提交入库
+        if (asyncProcessor != null) {
+            asyncProcessor.submitSatObservation(stationId, uniqueList);
+        } else if (storageService != null) {
+            storageService.saveSatObservationBatch(stationId, uniqueList);
+        }
+
+        logger.debug("站点 {} 刷新观测数据: {} 条（去重后 {} 条）",
+                stationId, toSave.size(), uniqueList.size());
     }
 
-    public String getCacheStatistics() {
-        return String.format("Cache[GSV=%d, RTCM=%d, Stations=%d]",
-                getGsvCacheSize(), getRtcmCacheSize(), stationLastFusionTime.size());
+    // ==================== 辅助方法 ====================
+
+    /**
+     * 构建缓存键
+     */
+    private String buildCacheKey(String stationId, String satNo) {
+        return stationId + "_" + satNo;
     }
 
-    // ==================== RTCM 观测数据内部类 ====================
+    /**
+     * 获取卫星系统名称
+     */
+    private String getSatSystemName(int sys) {
+        switch (sys) {
+            case 0: return "GPS";
+            case 1: return "GLONASS";
+            case 2: return "GALILEO";
+            case 3: return "QZSS";
+            case 4: return "BDS";
+            case 5: return "IRNSS";
+            case 6: return "SBAS";
+            default: return "UNKNOWN";
+        }
+    }
 
-    public static class RtcmObsData {
-        private String satNo;
-        private String satSystem;
-        private Double pseudorangeP1;
-        private Double pseudorangeP2;
-        private Double phaseL1;
-        private Double phaseL2;
-        private Double snr;
-        private String c1;
-        private String c2;
-        private Long timestamp;
+    // ==================== 统计接口 ====================
 
-        public String getSatNo() { return satNo; }
-        public void setSatNo(String satNo) { this.satNo = satNo; }
-        public String getSatSystem() { return satSystem; }
-        public void setSatSystem(String satSystem) { this.satSystem = satSystem; }
-        public Double getPseudorangeP1() { return pseudorangeP1; }
-        public void setPseudorangeP1(Double pseudorangeP1) { this.pseudorangeP1 = pseudorangeP1; }
-        public Double getPseudorangeP2() { return pseudorangeP2; }
-        public void setPseudorangeP2(Double pseudorangeP2) { this.pseudorangeP2 = pseudorangeP2; }
-        public Double getPhaseL1() { return phaseL1; }
-        public void setPhaseL1(Double phaseL1) { this.phaseL1 = phaseL1; }
-        public Double getPhaseL2() { return phaseL2; }
-        public void setPhaseL2(Double phaseL2) { this.phaseL2 = phaseL2; }
-        public Double getSnr() { return snr; }
-        public void setSnr(Double snr) { this.snr = snr; }
-        public String getC1() { return c1; }
-        public void setC1(String c1) { this.c1 = c1; }
-        public String getC2() { return c2; }
-        public void setC2(String c2) { this.c2 = c2; }
-        public Long getTimestamp() { return timestamp; }
-        public void setTimestamp(Long timestamp) { this.timestamp = timestamp; }
+    public long getGsvCacheSize() {
+        return gsvCache.estimatedSize();
+    }
+
+    public long getRtcmCacheSize() {
+        return rtcmCache.estimatedSize();
+    }
+
+    public long getZdaDateCacheSize() {
+        return zdaDateCache.estimatedSize();
+    }
+
+    public int getPendingObservationsCount() {
+        return pendingObservations.values().stream().mapToInt(List::size).sum();
+    }
+
+    public String getStatistics() {
+        return String.format("GSV缓存=%d, RTCM缓存=%d, ZDA日期缓存=%d, 待入库=%d",
+                getGsvCacheSize(), getRtcmCacheSize(), getZdaDateCacheSize(), getPendingObservationsCount());
+    }
+
+    // ==================== 内部类 ====================
+
+    /**
+     * RTCM 观测数据
+     */
+    private static class RtcmObsData {
+        String satNo;
+        String satSystem;
+        Double pseudorangeP1;
+        Double phaseL1;
+        Double snr1;
+        Double pseudorangeP2;
+        Double phaseP2;
+        Double snr2;
+        String code1;
+        String code2;
+        long epochTime;
+    }
+
+    /**
+     * ZDA 日期缓存
+     */
+    private static class ZdaDateCache {
+        LocalDate date;
+        LocalTime time;
+        long timestamp;
+        String source;
     }
 }

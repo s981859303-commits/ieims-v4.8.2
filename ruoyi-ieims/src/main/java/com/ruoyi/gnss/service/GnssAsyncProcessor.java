@@ -340,17 +340,10 @@ public class GnssAsyncProcessor {
     // ==================== 消费者方法 ====================
 
     private void startConsumers() {
-        // NMEA 消费者
-        consumerPool.submit(this::consumeNmea);
-
-        // RTCM 消费者
-        consumerPool.submit(this::consumeRtcm);
-
-        // 卫星观测数据消费者
-        consumerPool.submit(this::consumeSatObs);
-
-        // GNSS 解算结果消费者
-        consumerPool.submit(this::consumeGnssSolution);
+        new Thread(this::consumeNmea, "Consumer-NMEA").start();
+        new Thread(this::consumeRtcm, "Consumer-RTCM").start();
+        new Thread(this::consumeSatObs, "Consumer-SatObs").start();
+        new Thread(this::consumeGnssSolution, "Consumer-GnssSolution").start();
     }
 
     /**
