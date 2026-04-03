@@ -19,6 +19,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -26,7 +27,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * 混合日志解析器 (修复增强版)
+ * 混合日志解析器
  *
  * 功能：
  * 1. 解析 NMEA 和 RTCM 混合数据流
@@ -39,8 +40,9 @@ import java.util.concurrent.locks.ReentrantLock;
  * 2. 修复：新增 RTCM3 的 CRC24Q 校验，解决乱码导致的数据黑洞问题。
  * 3. 修复：安全防御 BufferOverflowException，抛弃超大异常帧。
  * 4. 修复：停止使用系统网络时间对齐数据，改用 RTCM 解析出的真实 GNSS 周内秒历元时间。
+ * 5. 【新增】NMEA 语句入库白名单过滤机制，只入库业务需要的语句类型。
  *
- * @version 2.1 - 2026-04-02 修复 NIO 边界漏洞与时序对齐 Bug
+ * @version 2.2 - 2026-04-03 新增 NMEA 入库白名单过滤机制
  */
 @Service
 public class MixedLogSplitter {
@@ -68,6 +70,49 @@ public class MixedLogSplitter {
             }
             CRC24Q_TABLE[i] = crc & 0xFFFFFF;
         }
+    }
+
+    // ==================== 【新增】NMEA 入库白名单 ====================
+
+    /**
+     * NMEA 语句入库白名单
+     * 只有在此白名单中的 NMEA 语句类型才会被写入 st_nmea_raw 表
+     *
+     * 当前支持的入库类型：
+     * - GGA: 定位数据（$GNGGA, $GPGGA, $BDGGA）
+     * - GSV: 卫星可见数据（$GPGSV, $GBGSV, $GLGSV, $GAGSV, $BDGSV, $QZGSV, $IGSV, $GNGSV）
+     * - ZDA: 时间日期数据（$GNZDA, $GPZDA, $BDZDA）
+     *
+     * 不入库的类型（示例）：
+     * - VTG: 航向速度数据
+     * - RMC: 推荐最小定位数据
+     * - GSA: DOP和卫星信息
+     * - 其他 NMEA 语句
+     */
+    private static final Set<String> NMEA_STORAGE_WHITELIST = new HashSet<>();
+
+    static {
+        // GGA 系列 - 定位数据
+        NMEA_STORAGE_WHITELIST.add("$GNGGA");  // 多系统混合
+        NMEA_STORAGE_WHITELIST.add("$GPGGA");  // GPS
+        NMEA_STORAGE_WHITELIST.add("$BDGGA");  // 北斗
+        NMEA_STORAGE_WHITELIST.add("$GLGGA");  // GLONASS
+        NMEA_STORAGE_WHITELIST.add("$GAGGA");  // Galileo
+
+        // GSV 系列 - 卫星可见数据
+        NMEA_STORAGE_WHITELIST.add("$GPGSV");  // GPS
+        NMEA_STORAGE_WHITELIST.add("$GBGSV");  // 北斗
+        NMEA_STORAGE_WHITELIST.add("$BDGSV");  // 北斗（备选）
+        NMEA_STORAGE_WHITELIST.add("$GLGSV");  // GLONASS
+        NMEA_STORAGE_WHITELIST.add("$GAGSV");  // Galileo
+        NMEA_STORAGE_WHITELIST.add("$QZGSV");  // QZSS
+        NMEA_STORAGE_WHITELIST.add("$IGSV");   // IRNSS
+        NMEA_STORAGE_WHITELIST.add("$GNGSV");  // 多系统混合
+
+        // ZDA 系列 - 时间日期数据
+        NMEA_STORAGE_WHITELIST.add("$GNZDA");  // 多系统混合
+        NMEA_STORAGE_WHITELIST.add("$GPZDA");  // GPS
+        NMEA_STORAGE_WHITELIST.add("$BDZDA");  // 北斗
     }
 
     // ==================== 依赖注入 ====================
@@ -103,9 +148,15 @@ public class MixedLogSplitter {
     private final AtomicLong zdaCount = new AtomicLong(0);
     private final AtomicLong globalBufferOverflowCount = new AtomicLong(0);
 
+    // 【新增】入库统计
+    private final AtomicLong nmeaStorageCount = new AtomicLong(0);
+    private final AtomicLong nmeaFilteredCount = new AtomicLong(0);
+
     @PostConstruct
     public void init() {
         logger.info("MixedLogSplitter 初始化完成，默认站点: {}", defaultStationId);
+        logger.info("NMEA 入库白名单已加载，共 {} 种语句类型: {}",
+                NMEA_STORAGE_WHITELIST.size(), NMEA_STORAGE_WHITELIST);
         getOrCreateStationState(defaultStationId);
     }
 
@@ -132,6 +183,35 @@ public class MixedLogSplitter {
     public LocalDate getCurrentZdaDate(String stationId) {
         StationState state = stationStates.get(stationId);
         return (state != null) ? state.cachedZdaDate : null;
+    }
+
+    /**
+     * 【新增】判断 NMEA 语句是否在入库白名单中
+     *
+     * @param nmea NMEA 语句
+     * @return true 表示需要入库
+     */
+    public boolean shouldStoreNmea(String nmea) {
+        if (nmea == null || nmea.isEmpty()) {
+            return false;
+        }
+        String trimmed = nmea.trim();
+        // 检查是否以白名单中的任一前缀开头
+        for (String prefix : NMEA_STORAGE_WHITELIST) {
+            if (trimmed.startsWith(prefix)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 【新增】获取 NMEA 入库白名单（只读）
+     *
+     * @return 白名单集合的副本
+     */
+    public Set<String> getNmeaStorageWhitelist() {
+        return new HashSet<>(NMEA_STORAGE_WHITELIST);
     }
 
     // ==================== 核心处理逻辑 ====================
@@ -219,28 +299,77 @@ public class MixedLogSplitter {
         buffer.clear();
     }
 
+    /**
+     * 【核心修复】处理 NMEA 语句
+     *
+     * 修改说明：
+     * 1. 先执行业务逻辑处理（ZDA/GSV/GGA）
+     * 2. 然后根据白名单判断是否需要入库
+     * 3. 白名单内的语句调用 asyncProcessor.submitNmea() 入库
+     * 4. 白名单外的语句不入库，但记录过滤统计
+     *
+     * @param state 站点状态
+     * @param nmea NMEA 语句
+     */
     private void processNmea(StationState state, String nmea) {
         if (nmea == null || nmea.isEmpty()) return;
         String trimmed = nmea.trim();
 
+        // ==================== 业务逻辑处理 ====================
+
+        // 处理 ZDA 语句（时间日期）
         if (zdaParser.isZdaSentence(trimmed)) {
             processZda(state, trimmed);
-            return;
+            // 【修复】不再直接 return，继续判断是否入库
         }
-
-        if (gsvParser.isGsvSentence(trimmed)) {
+        // 处理 GSV 语句（卫星可见数据）
+        else if (gsvParser.isGsvSentence(trimmed)) {
             processGsv(state, trimmed);
-            return;
+            // 【修复】不再直接 return，继续判断是否入库
+        }
+        // 处理 GGA 语句（定位数据）
+        else if (isGgaSentence(trimmed)) {
+            processGga(state, trimmed);
+            // 【修复】不再直接 return，继续判断是否入库
         }
 
-        if (trimmed.startsWith("$GPGGA") || trimmed.startsWith("$GNGGA") || trimmed.startsWith("$BDGGA")) {
-            processGga(state, trimmed);
-            return;
-        }
+        // ==================== 入库白名单过滤 ====================
 
         if (asyncProcessor != null) {
-            asyncProcessor.submitNmea(state.stationId, trimmed);
+            if (shouldStoreNmea(trimmed)) {
+                // 白名单内的语句，执行入库
+                asyncProcessor.submitNmea(state.stationId, trimmed);
+                nmeaStorageCount.incrementAndGet();
+
+                if (logger.isDebugEnabled()) {
+                    logger.debug("NMEA入库: {} -> {}", state.stationId, truncateForLog(trimmed));
+                }
+            } else {
+                // 白名单外的语句，不入库，记录过滤统计
+                nmeaFilteredCount.incrementAndGet();
+
+                if (logger.isTraceEnabled()) {
+                    logger.trace("NMEA过滤(不入库): {} -> {}", state.stationId, truncateForLog(trimmed));
+                }
+            }
         }
+    }
+
+    /**
+     * 判断是否为 GGA 语句
+     *
+     * @param nmea NMEA 语句
+     * @return true 表示是 GGA 语句
+     */
+    private boolean isGgaSentence(String nmea) {
+        if (nmea == null || nmea.isEmpty()) {
+            return false;
+        }
+        return nmea.startsWith("$GPGGA") ||
+                nmea.startsWith("$GNGGA") ||
+                nmea.startsWith("$BDGGA") ||
+                nmea.startsWith("$GLGGA") ||
+                nmea.startsWith("$GAGGA");
     }
 
     private void processZda(StationState state, String nmea) {
@@ -430,9 +559,55 @@ public class MixedLogSplitter {
         }
     }
 
-    // ==================== 统计与内部类 ====================
+    /**
+     * 截断字符串用于日志输出
+     */
+    private String truncateForLog(String s) {
+        if (s == null) return "null";
+        return s.length() > 80 ? s.substring(0, 80) + "..." : s;
+    }
 
-    // ... 省略其他原样保留的 getter/setter 和 Statistics 方法 ...
+    // ==================== 统计方法 ====================
+
+    /**
+     * 获取 NMEA 处理统计信息
+     */
+    public String getStatistics() {
+        return String.format(
+                "NMEA统计: 总接收=%d, 入库=%d, 过滤=%d, GSV=%d, ZDA=%d, RTCM=%d, 缓冲溢出=%d",
+                nmeaCount.get(), nmeaStorageCount.get(), nmeaFilteredCount.get(),
+                gsvCount.get(), zdaCount.get(), rtcmCount.get(), globalBufferOverflowCount.get()
+        );
+    }
+
+    /**
+     * 获取入库数量
+     */
+    public long getNmeaStorageCount() {
+        return nmeaStorageCount.get();
+    }
+
+    /**
+     * 获取过滤数量
+     */
+    public long getNmeaFilteredCount() {
+        return nmeaFilteredCount.get();
+    }
+
+    /**
+     * 重置统计信息
+     */
+    public void resetStatistics() {
+        nmeaCount.set(0);
+        nmeaStorageCount.set(0);
+        nmeaFilteredCount.set(0);
+        gsvCount.set(0);
+        zdaCount.set(0);
+        rtcmCount.set(0);
+        globalBufferOverflowCount.set(0);
+    }
+
+    // ==================== 内部类 ====================
 
     private static class StationState {
         String stationId;

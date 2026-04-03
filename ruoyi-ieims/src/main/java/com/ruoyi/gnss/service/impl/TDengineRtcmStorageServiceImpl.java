@@ -6,26 +6,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.Base64;
+import java.util.List;
+import java.util.Locale;
 
 /**
- * RTCM 观测数据存储服务实现类
+ * TDengine RTCM 存储服务实现
  *
- * <p>
- * 将 RTCM 1074/1127 解算出的卫星观测数据存储到 TDengine 数据库的 st_sat_obs 表中。
- * 数据来源：RTCM 1074（GPS MSM4）、RTCM 1127（BeiDou MSM4）等观测值消息
- * </p>
- *
- * <p>
- * 优化内容：
- * 1. 废弃 Base64 + NCHAR 存储，改用原生 BINARY 类型直接存储 byte[] 字节流，大幅提升性能与空间利用率
- * 2. 使用 JdbcTemplate 的预编译参数绑定原生 byte[]，防止截断或语法错误
- * </p>
  */
 @Service
 @ConditionalOnProperty(name = "gnss.tdengine.enabled", havingValue = "true", matchIfMissing = false)
@@ -39,116 +31,136 @@ public class TDengineRtcmStorageServiceImpl implements IRtcmStorageService {
     @Value("${gnss.parser.stationId:8900_1}")
     private String stationId;
 
-    /** RTCM 原始数据超级表 */
     private static final String STABLE_RTCM_RAW = "st_rtcm_raw";
+    private static final String STABLE_SAT_OBS = "st_satellite_obs";
 
     @Resource
     private TDengineUtil tdengineUtil;
 
-    // 引入 Spring 原生的 JdbcTemplate 进行安全的二进制流插入
-    @Resource
-    private JdbcTemplate jdbcTemplate;
+    // 服务状态标识
+    private boolean initialized = false;
 
-    /** 缓存的站点ID */
-    private String cachedSanitizedStationId;
+    public static class ObsData {
+        public String satName, obsTime, c1, c2;
+        public Double p1, p2, l1, l2, s1, elevation, azimuth;
 
-    /** 缓存的 RTCM 原始数据表名 */
-    private String cachedRtcmTableName;
-
-    /** 统计信息 */
-    private final AtomicLong savedCount = new AtomicLong(0);
-    private final AtomicLong failedCount = new AtomicLong(0);
-
-    private volatile boolean initialized = false;
-
-    @PostConstruct
-    @Override
-    public boolean isInitialized() {
-        return initialized;
+        public ObsData(String satName, String obsTime, String c1, String c2, Double p1, Double p2, Double l1, Double l2, Double s1, Double elevation, Double azimuth) {
+            this.satName = satName; this.obsTime = obsTime; this.c1 = c1; this.c2 = c2;
+            this.p1 = p1; this.p2 = p2; this.l1 = l1; this.l2 = l2; this.s1 = s1;
+            this.elevation = elevation; this.azimuth = azimuth;
+        }
     }
 
     @PostConstruct
     public void init() {
         try {
-            this.cachedSanitizedStationId = sanitizeTableName(stationId);
-            this.cachedRtcmTableName = "rtcm_" + cachedSanitizedStationId;
-
             initTables();
             initialized = true;
-            logger.info("TDengine RTCM 存储服务初始化成功 (二进制原生存储版)");
+            logger.info("✅ TDengine RTCM 存储服务初始化成功 (支持星空数据融合)");
         } catch (Exception e) {
-            logger.error("TDengine RTCM 存储服务初始化失败: {}", e.getMessage());
+            logger.error("❌ TDengine RTCM 存储服务初始化失败: {}", e.getMessage());
         }
     }
 
-    /**
-     * 初始化超级表
-     */
     private void initTables() {
-        tdengineUtil.executeDDL("USE " + database);
+        try {
+            tdengineUtil.executeDDL("CREATE DATABASE IF NOT EXISTS " + database);
+        } catch (Exception ignored) {}
 
-        // RTCM 原始数据表
-        // 【核心修改】将 NCHAR(4096) 替换为 BINARY(4096) 以存储原生字节流。
-        // （注：如果您使用的是 TDengine 3.x 版本，建议将 BINARY 替换为 VARBINARY）
         String createRtcmStableSql = String.format(
                 "CREATE STABLE IF NOT EXISTS %s (" +
-                        "ts TIMESTAMP, data_len INT, raw_data BINARY(4096)" +
+                        "ts TIMESTAMP, data_len INT, data_base64 NCHAR(4096)" +
                         ") TAGS (station_id VARCHAR(50))",
                 STABLE_RTCM_RAW
         );
         tdengineUtil.executeDDL(createRtcmStableSql);
 
-        // 预建 RTCM raw 的子表
+        String createSatObsStableSql = String.format(
+                "CREATE STABLE IF NOT EXISTS %s (" +
+                        "ts TIMESTAMP, obs_time VARCHAR(30), c1 VARCHAR(10), c2 VARCHAR(10), " +
+                        "p1 DOUBLE, p2 DOUBLE, l1 DOUBLE, l2 DOUBLE, s1 DOUBLE, " +
+                        "elevation DOUBLE, azimuth DOUBLE" +
+                        ") TAGS (station_id VARCHAR(50), sat_name VARCHAR(10))",
+                STABLE_SAT_OBS
+        );
+        tdengineUtil.executeDDL(createSatObsStableSql);
+
+        String rtcmTable = "rtcm_" + sanitizeTableName(stationId);
         tdengineUtil.executeDDL(String.format(
                 "CREATE TABLE IF NOT EXISTS %s USING %s TAGS ('%s')",
-                cachedRtcmTableName, STABLE_RTCM_RAW, stationId
+                rtcmTable, STABLE_RTCM_RAW, stationId
         ));
+    }
 
-        logger.info("创建/确认超级表完成: {}", STABLE_RTCM_RAW);
+    // ==========================================
+    // 🔥 核心修复：实现接口要求的抽象方法
+    // ==========================================
+    @Override
+    public boolean isInitialized() {
+        return this.initialized;
     }
 
     @Override
     public boolean saveRtcmRawData(byte[] rtcmData) {
-        if (!initialized || rtcmData == null || rtcmData.length == 0) {
-            return false;
-        }
-
+        if (!initialized || rtcmData == null || rtcmData.length == 0) return false;
         try {
+            String tableName = "rtcm_" + sanitizeTableName(stationId);
             long timestamp = System.currentTimeMillis();
-
-            // 预编译参数化查询，防止 SQL 注入及二进制字符截断
-            String sql = String.format(
-                    "INSERT INTO %s (ts, data_len, raw_data) VALUES (?, ?, ?)",
-                    cachedRtcmTableName
+            String base64Data = Base64.getEncoder().encodeToString(rtcmData);
+            String insertSql = String.format(
+                    "INSERT INTO %s (ts, data_len, data_base64) VALUES (%d, %d, '%s')",
+                    tableName, timestamp, rtcmData.length, base64Data
             );
-
-            // 【核心修改】直接将 byte[] 传给 JdbcTemplate，底层 JDBC 驱动会自动处理二进制流封装
-            jdbcTemplate.update(sql, timestamp, rtcmData.length, rtcmData);
-
-            savedCount.incrementAndGet();
+            tdengineUtil.executeUpdate(insertSql);
             return true;
-
         } catch (Exception e) {
-            failedCount.incrementAndGet();
-            long failCount = failedCount.get();
-            // 降低错误日志打印频率
-            if (failCount % 100 == 1) {
-                logger.error("存储 RTCM 二进制数据失败 [累计失败: {}]: {}", failCount, e.getMessage());
-            }
             return false;
         }
     }
 
-    @Override
-    public String getStatistics() {
-        return String.format("RTCM[saved=%d, failed=%d]",
-                savedCount.get(), failedCount.get());
+    @Async("gnssThreadPool")
+    public void saveSatelliteObsBatch(long timestamp, List<ObsData> obsList) {
+        if (!initialized || obsList == null || obsList.isEmpty()) return;
+
+        // 统一添加 500 条分片策略，避免长度越界
+        int batchSize = 500;
+        for (int i = 0; i < obsList.size(); i += batchSize) {
+            int end = Math.min(i + batchSize, obsList.size());
+            executeSubBatch(timestamp, obsList.subList(i, end));
+        }
+    }
+
+    private void executeSubBatch(long timestamp, List<ObsData> subList) {
+        try {
+            StringBuilder sqlBuilder = new StringBuilder("INSERT INTO ");
+            String sanitizedStationId = sanitizeTableName(stationId);
+
+            for (ObsData obs : subList) {
+                String tableName = "satobs_" + sanitizedStationId + "_" + sanitizeTableName(obs.satName);
+                sqlBuilder.append(String.format(Locale.US,
+                        "%s USING %s TAGS ('%s', '%s') VALUES (%d, '%s', '%s', '%s', %f, %f, %f, %f, %f, %f, %f) ",
+                        tableName, STABLE_SAT_OBS, stationId, obs.satName,
+                        timestamp,
+                        obs.obsTime != null ? obs.obsTime : "",
+                        obs.c1 != null ? obs.c1 : "",
+                        obs.c2 != null ? obs.c2 : "",
+                        obs.p1 != null ? obs.p1 : 0.0,
+                        obs.p2 != null ? obs.p2 : 0.0,
+                        obs.l1 != null ? obs.l1 : 0.0,
+                        obs.l2 != null ? obs.l2 : 0.0,
+                        obs.s1 != null ? obs.s1 : 0.0,
+                        obs.elevation != null ? obs.elevation : 0.0,
+                        obs.azimuth != null ? obs.azimuth : 0.0
+                ));
+            }
+            tdengineUtil.executeUpdate(sqlBuilder.toString());
+        } catch (Exception e) {
+            logger.error("❌ 批量存储卫星观测数据失败: {}", e.getMessage());
+        }
     }
 
     private String sanitizeTableName(String name) {
-        if (name == null) {
-            return "unknown";
-        }
+        if (name == null) return "unknown";
         return name.replaceAll("[^a-zA-Z0-9_]", "_");
     }
 }

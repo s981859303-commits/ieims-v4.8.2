@@ -25,7 +25,13 @@ import java.util.concurrent.atomic.AtomicLong;
  * 2. 使用 volatile 修饰 initialized 保证可见性
  * 3. 添加统计计数器
  * 4. 支持多站点
- * 5. 【核心修复】使用 JdbcTemplate 的批量 PreparedStatement 替代字符串拼接，彻底杜绝 SQL 注入并大幅提升批量写入性能
+ * 5. 使用 JdbcTemplate 的批量 PreparedStatement 替代字符串拼接，彻底杜绝 SQL 注入并大幅提升批量写入性能
+ * </p>
+ *
+ * <p>
+ * v2.1 修复内容：
+ * 1. 使用 TDengineUtil.useDatabase() 替代直接执行 USE 语句
+ * 2. 确保数据库存在后再切换
  * </p>
  *
  * @author GNSS Team
@@ -59,12 +65,10 @@ public class TDengineNmeaStorageServiceImpl implements INmeaStorageService {
     @Resource
     private TDengineUtil tdengineUtil;
 
-    // 引入 Spring 原生的 JdbcTemplate 进行高性能安全的批量插入
-    // (通常在配置 TDengine 数据源时，系统中会自动装配好对应的 JdbcTemplate)
     @Resource
     private JdbcTemplate jdbcTemplate;
 
-    // ==================== 缓存变量（优化点） ====================
+    // ==================== 缓存变量 ====================
 
     /** 缓存的默认表名 */
     private String cachedDefaultTableName;
@@ -94,18 +98,26 @@ public class TDengineNmeaStorageServiceImpl implements INmeaStorageService {
 
             initTables();
             initialized = true;
-            logger.info("TDengine NMEA 存储服务初始化成功，默认站点: {}, 默认表: {}",
-                    defaultStationId, cachedDefaultTableName);
+            logger.info("TDengine NMEA 存储服务初始化成功 - database: {}, 默认站点: {}, 默认表: {}",
+                    database, defaultStationId, cachedDefaultTableName);
         } catch (Exception e) {
-            logger.error("TDengine NMEA 存储服务初始化失败: {}", e.getMessage());
+            initialized = false;
+            logger.error("TDengine NMEA 存储服务初始化失败: {}", e.getMessage(), e);
         }
     }
 
     /**
      * 初始化超级表和默认子表
+     *
+     * <p>
+     * 修复说明：
+     * - 使用 tdengineUtil.useDatabase() 替代直接执行 "USE database"
+     * - useDatabase() 会先确保数据库存在，然后再切换
+     * </p>
      */
     private void initTables() {
-        tdengineUtil.executeDDL("USE " + database);
+        // 【修复】使用 useDatabase 替代直接执行 USE 语句
+        tdengineUtil.useDatabase(database);
 
         // 创建超级表
         String createStableSql = String.format(
@@ -115,6 +127,7 @@ public class TDengineNmeaStorageServiceImpl implements INmeaStorageService {
                 STABLE_NAME
         );
         tdengineUtil.executeDDL(createStableSql);
+        logger.info("超级表已创建/确认: {}.{}", database, STABLE_NAME);
 
         // 创建默认子表
         String createTableSql = String.format(
@@ -122,8 +135,7 @@ public class TDengineNmeaStorageServiceImpl implements INmeaStorageService {
                 cachedDefaultTableName, STABLE_NAME, defaultStationId
         );
         tdengineUtil.executeDDL(createTableSql);
-
-        logger.info("创建 NMEA 表: {}", cachedDefaultTableName);
+        logger.info("子表已创建/确认: {}", cachedDefaultTableName);
     }
 
     // ==================== 接口实现 ====================
@@ -151,7 +163,6 @@ public class TDengineNmeaStorageServiceImpl implements INmeaStorageService {
 
             String nmeaType = extractNmeaType(record.getRawContent());
 
-            // 预编译参数化查询，防止单条 SQL 注入
             String insertSql = String.format(
                     "INSERT INTO %s (ts, nmea_type, raw_content) VALUES (?, ?, ?)",
                     tableName
@@ -190,10 +201,8 @@ public class TDengineNmeaStorageServiceImpl implements INmeaStorageService {
             String tableName = getTableName(stationId);
             long currentTime = System.currentTimeMillis();
 
-            // 1. 构造带有占位符的单条 SQL 模板
             String sql = String.format("INSERT INTO %s (ts, nmea_type, raw_content) VALUES (?, ?, ?)", tableName);
 
-            // 2. 将数据组装为批量参数列表
             List<Object[]> batchArgs = new ArrayList<>(records.size());
 
             for (NmeaRecord record : records) {
@@ -205,12 +214,10 @@ public class TDengineNmeaStorageServiceImpl implements INmeaStorageService {
                         record.getReceivedTime().getTime() : currentTime;
                 String nmeaType = extractNmeaType(record.getRawContent());
 
-                // 直接放入原始字符串，底层驱动的 PreparedStatement 会自动且安全地处理所有特殊字符转义
                 batchArgs.add(new Object[]{timestamp, nmeaType, record.getRawContent()});
             }
 
             if (!batchArgs.isEmpty()) {
-                // 3. 执行真正的标准批量插入（底层驱动利用 Batch 技术一次性发往数据库）
                 jdbcTemplate.batchUpdate(sql, batchArgs);
 
                 int successCount = batchArgs.size();
@@ -224,7 +231,7 @@ public class TDengineNmeaStorageServiceImpl implements INmeaStorageService {
 
         } catch (Exception e) {
             failedCount.addAndGet(records.size());
-            logger.error("批量存储 NMEA 数据失败: {}", e.getMessage());
+            logger.error("批量存储 NMEA 数据失败: {}", e.getMessage(), e);
             return 0;
         }
     }
@@ -277,6 +284,4 @@ public class TDengineNmeaStorageServiceImpl implements INmeaStorageService {
         }
         return name.replaceAll("[^a-zA-Z0-9_]", "_");
     }
-
-    // 注意：旧版的 escapeString(String str) 方法已被删除，因为使用了 PreparedStatement 后不再需要手动转义。
 }

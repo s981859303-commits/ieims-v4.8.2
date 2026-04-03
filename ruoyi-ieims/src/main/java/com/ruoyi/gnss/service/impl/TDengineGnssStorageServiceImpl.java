@@ -14,6 +14,12 @@ import javax.annotation.Resource;
 
 /**
  * TDengine GNSS 存储服务实现
+ *
+ * <p>
+ * 修复内容：
+ * 1. 使用 TDengineUtil.useDatabase() 替代直接执行 USE 语句
+ * 2. 确保数据库存在后再切换
+ * </p>
  */
 @Service
 @ConditionalOnProperty(name = "gnss.tdengine.enabled", havingValue = "true", matchIfMissing = false)
@@ -35,69 +41,92 @@ public class TDengineGnssStorageServiceImpl implements IGnssStorageService {
     @Resource
     private TDengineUtil tdengineUtil;
 
-    private boolean initialized = false;
+    private volatile boolean initialized = false;
 
     @PostConstruct
     public void init() {
         try {
             initTables();
             initialized = true;
-            logger.info("TDengine GNSS 存储服务初始化成功");
+            logger.info("TDengine GNSS 存储服务初始化成功 - database: {}", database);
         } catch (Exception e) {
-            logger.error("TDengine GNSS 存储服务初始化失败: {}", e.getMessage());
+            initialized = false;
+            logger.error("TDengine GNSS 存储服务初始化失败: {}", e.getMessage(), e);
         }
     }
 
+    /**
+     * 初始化超级表和子表
+     *
+     * <p>
+     * 修复说明：
+     * - 使用 tdengineUtil.useDatabase() 替代直接执行 "USE database"
+     * - useDatabase() 会先确保数据库存在，然后再切换
+     * </p>
+     */
     private void initTables() {
-        tdengineUtil.executeDDL("USE " + database);
+        // 【修复】使用 useDatabase 替代直接执行 USE 语句
+        // useDatabase 会先确保数据库存在，然后再切换
+        tdengineUtil.useDatabase(database);
 
+        // 创建超级表
         String createStableSql = String.format(
-            "CREATE STABLE IF NOT EXISTS %s (" +
-            "ts TIMESTAMP, lat DOUBLE, lon DOUBLE, alt DOUBLE, " +
-            "status INT, sat_count INT, hdop DOUBLE" +
-            ") TAGS (station_id VARCHAR(50))",
-            STABLE_NAME
+                "CREATE STABLE IF NOT EXISTS %s (" +
+                        "ts TIMESTAMP, lat DOUBLE, lon DOUBLE, alt DOUBLE, " +
+                        "status INT, sat_count INT, hdop DOUBLE" +
+                        ") TAGS (station_id VARCHAR(50))",
+                STABLE_NAME
         );
         tdengineUtil.executeDDL(createStableSql);
+        logger.info("超级表已创建/确认: {}.{}", database, STABLE_NAME);
 
+        // 创建默认子表
         String tableName = tablePrefix + sanitizeTableName(stationId);
         String createTableSql = String.format(
-            "CREATE TABLE IF NOT EXISTS %s USING %s TAGS ('%s')",
-            tableName, STABLE_NAME, stationId
+                "CREATE TABLE IF NOT EXISTS %s USING %s TAGS ('%s')",
+                tableName, STABLE_NAME, stationId
         );
         tdengineUtil.executeDDL(createTableSql);
-        
-        logger.info("创建 GNSS 表: {}", tableName);
+        logger.info("子表已创建/确认: {}", tableName);
     }
 
     @Override
     public void saveSolution(GnssSolution solution) {
-        if (!initialized || solution == null) return;
+        if (!initialized || solution == null) {
+            return;
+        }
 
         try {
             String tableName = tablePrefix + sanitizeTableName(stationId);
             long timestamp = solution.getTime() != null ? solution.getTime().getTime() : System.currentTimeMillis();
 
             String insertSql = String.format(
-                "INSERT INTO %s (ts, lat, lon, alt, status, sat_count, hdop) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                tableName
+                    "INSERT INTO %s (ts, lat, lon, alt, status, sat_count, hdop) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    tableName
             );
 
             tdengineUtil.executeUpdate(insertSql,
-                timestamp,
-                solution.getLatitude(),
-                solution.getLongitude(),
-                solution.getAltitude(),
-                solution.getStatus(),
-                solution.getSatelliteCount(),
-                solution.getHdop()
+                    timestamp,
+                    solution.getLatitude(),
+                    solution.getLongitude(),
+                    solution.getAltitude(),
+                    solution.getStatus(),
+                    solution.getSatelliteCount(),
+                    solution.getHdop()
             );
 
             logger.debug("GNSS 解算结果已存储");
 
         } catch (Exception e) {
-            logger.error("存储 GNSS 解算结果失败: {}", e.getMessage());
+            logger.error("存储 GNSS 解算结果失败: {}", e.getMessage(), e);
         }
+    }
+
+    /**
+     * 检查服务是否初始化成功
+     */
+    public boolean isInitialized() {
+        return initialized;
     }
 
     private String sanitizeTableName(String name) {
