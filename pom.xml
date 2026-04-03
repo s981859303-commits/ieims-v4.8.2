@@ -264,6 +264,14 @@
             </dependency>
 
             <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-codec-native-quic</artifactId>
+                <version>4.2.11.Final</version>
+                <classifier>linux-x86_64</classifier>
+                <type>jar</type>
+            </dependency>
+
+            <dependency>
                 <groupId>com.taosdata.jdbc</groupId>
                 <artifactId>taos-jdbcdriver</artifactId>
                 <version>3.2.7</version> </dependency>

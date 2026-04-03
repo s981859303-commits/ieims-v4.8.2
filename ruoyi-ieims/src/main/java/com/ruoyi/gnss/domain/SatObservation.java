@@ -77,7 +77,7 @@ public class SatObservation {
     private LocalDate observationDate;
 
     /** 观测时间（时分秒毫秒） */
-    private LocalTime obsTime;
+    private LocalTime observationTime;
 
     /** 唯一标识键（格式：日期_时间_卫星编号，如 2026-04-01_083015.000_G01） */
     private String obsUniqueKey;

@@ -479,7 +479,7 @@ public class GnssAsyncProcessor {
                     if (task.stationId != null) {
                         satObservationStorageService.saveSatObservationBatch(task.stationId, task.observations);
                     } else {
-                        satObservationStorageService.saveSatObservationBatch(task.observations);
+                        satObservationStorageService.saveSatObservationBatch("default", task.observations);
                     }
                 }
                 counters.get("satobs.processed").addAndGet(task.observations.size());
@@ -532,7 +532,7 @@ public class GnssAsyncProcessor {
     private void flushAll() {
         // 触发融合服务入库
         if (fusionService != null) {
-            fusionService.fuseAndStore();
+            fusionService.flushPending();
         }
     }
 

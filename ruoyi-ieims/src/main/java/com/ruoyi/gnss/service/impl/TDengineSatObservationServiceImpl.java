@@ -15,585 +15,623 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 /**
- * TDengine 卫星观测数据存储服务实现（增强版 - 支持日期字段）
+ * TDengine 卫星观测数据存储服务实现（修复版）
  *
  * 超级表结构：st_sat_observation
- * - 改造前：ts, epoch_time, sat_no, sat_system, elevation, azimuth, snr,
- *           pseudorange_p1, phase_l1, pseudorange_p2, phase_p2, c1, c2, data_source
- * - 改造后：新增 observation_date, obs_time, obs_unique_key, date_source
+ * - ts: 主时间戳（接收时间）
+ * - epoch_time: 历元时间（GNSS时间，仅时分秒毫秒）
+ * - sat_no: 卫星编号
+ * - sat_system: 卫星系统
+ * - elevation: 仰角
+ * - azimuth: 方位角
+ * - snr: 信噪比
+ * - pseudorange_p1: 伪距P1
+ * - phase_l1: 载波相位L1
+ * - pseudorange_p2: 伪距P2
+ * - phase_p2: 载波相位P2
+ * - c1: 信号代码1
+ * - c2: 信号代码2
+ * - data_source: 数据来源（GSV/RTCM/FUSED）
+ * - observation_date: 观测日期
+ * - obs_time: 观测时间（时分秒毫秒）
+ * - obs_unique_key: 唯一键
+ * - date_source: 日期来源
  *
- * 标签：station_id
+ * 子表命名规则：st_sat_observation_{stationId}
  *
- * 【重构说明】
- * 1. 新增 observation_date 字段存储观测日期
- * 2. 新增 obs_time 字段存储观测时间（时分秒毫秒）
- * 3. 新增 obs_unique_key 字段作为唯一标识
- * 4. 新增 date_source 字段标记日期来源
- * 5. 支持批量插入优化
- * 6. 支持去重和幂等性
- *
- * @author GNSS Team
- * @version 2.0 - 2026-04-02 添加日期字段支持
+ * @version 2.1 - 2026-04-02 修复严重bug
  */
 @Service
 public class TDengineSatObservationServiceImpl implements ISatObservationStorageService {
 
     private static final Logger logger = LoggerFactory.getLogger(TDengineSatObservationServiceImpl.class);
 
-    // ==================== 常量定义 ====================
+    // ==================== 配置参数 ====================
 
-    /** 超级表名称 */
-    private static final String SUPER_TABLE = "st_sat_observation";
+    @Value("${tdengine.database:gnss}")
+    private String database;
 
-    /** 日期格式化器 */
-    private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+    @Value("${tdengine.supertable.sat_observation:st_sat_observation}")
+    private String superTable;
 
-    /** 时间格式化器 */
-    private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss.SSS");
-
-    /** 日期时间格式化器 */
-    private static final DateTimeFormatter DATETIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
-
-    /** 批量插入大小 */
-    private static final int BATCH_INSERT_SIZE = 500;
-
-    /** 最大重试次数 */
-    private static final int MAX_RETRY_COUNT = 3;
-
-    /** 重试间隔（毫秒） */
-    private static final long RETRY_INTERVAL_MS = 100;
+    @Value("${tdengine.batchSize:100}")
+    private int batchSize;
 
     // ==================== 依赖注入 ====================
 
     @Autowired
     private JdbcTemplate jdbcTemplate;
 
-    @Value("${gnss.storage.database:gnss}")
-    private String database;
-
-    @Value("${gnss.storage.batchSize:500}")
-    private int batchSize;
-
-    @Value("${gnss.storage.enableDedup:true}")
-    private boolean enableDedup;
-
     // ==================== 统计计数器 ====================
 
-    private final AtomicLong insertCount = new AtomicLong(0);
-    private final AtomicLong errorCount = new AtomicLong(0);
-    private final AtomicLong dedupCount = new AtomicLong(0);
+    private final AtomicLong totalInsertCount = new AtomicLong(0);
+    private final AtomicLong totalQueryCount = new AtomicLong(0);
+    private final AtomicLong totalErrorCount = new AtomicLong(0);
 
-    // ==================== 公共接口实现 ====================
+    // ==================== 子表缓存 ====================
+
+    /** 已创建的子表缓存 */
+    private final Set<String> createdTables = ConcurrentHashMap.newKeySet();
+
+    // ==================== 时间格式化器 ====================
+
+    private static final DateTimeFormatter DATE_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+    private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss.SSS");
+    private static final DateTimeFormatter DATETIME_FORMATTER = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
+
+    // ==================== 初始化 ====================
 
     /**
-     * 保存单条卫星观测数据
-     *
-     * @param stationId   站点ID
-     * @param observation 观测数据
+     * 初始化：确保超级表存在
      */
+    @javax.annotation.PostConstruct
+    public void init() {
+        try {
+            createSuperTableIfNotExists();
+            logger.info("TDengine卫星观测数据存储服务初始化完成 - database: {}, superTable: {}", database, superTable);
+        } catch (Exception e) {
+            logger.error("初始化失败", e);
+        }
+    }
+
+    // ==================== 单条保存 ====================
+
     @Override
-    @Transactional(rollbackFor = Exception.class)
     public void saveSatObservation(String stationId, SatObservation observation) {
         if (observation == null) {
             return;
         }
 
-        saveSatObservationBatch(stationId, Collections.singletonList(observation));
+        if (stationId == null || stationId.isEmpty()) {
+            stationId = observation.getStationId() != null ? observation.getStationId() : "default";
+        }
+
+        try {
+            // 【修复】预处理观测数据 - 不再调用私有方法
+            preprocessObservation(observation);
+
+            // 确保子表存在
+            String tableName = getTableName(stationId);
+            ensureTableExists(stationId, tableName);
+
+            // 插入数据
+            String sql = buildInsertSql(tableName);
+            Object[] params = buildInsertParams(observation);
+
+            jdbcTemplate.update(sql, params);
+
+            totalInsertCount.incrementAndGet();
+            logger.debug("保存卫星观测数据成功: stationId={}, satNo={}", stationId, observation.getSatNo());
+
+        } catch (Exception e) {
+            totalErrorCount.incrementAndGet();
+            logger.error("保存卫星观测数据失败: stationId={}, satNo={}, error={}",
+                    stationId, observation.getSatNo(), e.getMessage(), e);
+        }
     }
 
-    /**
-     * 批量保存卫星观测数据
-     *
-     * @param stationId    站点ID
-     * @param observations 观测数据列表
-     */
+    // ==================== 批量保存 ====================
+
     @Override
-    @Transactional(rollbackFor = Exception.class)
     public void saveSatObservationBatch(String stationId, List<SatObservation> observations) {
         if (observations == null || observations.isEmpty()) {
             return;
         }
 
-        // 数据校验和预处理
-        List<SatObservation> validObservations = preprocessObservations(stationId, observations);
-        if (validObservations.isEmpty()) {
-            return;
+        if (stationId == null || stationId.isEmpty()) {
+            stationId = "default";
         }
 
-        // 去重处理
-        if (enableDedup) {
-            validObservations = deduplicateObservations(validObservations);
+        try {
+            // 【修复】预处理所有观测数据 - 不再调用私有方法
+            for (SatObservation obs : observations) {
+                preprocessObservation(obs);
+            }
+
+            // 确保子表存在
+            String tableName = getTableName(stationId);
+            ensureTableExists(stationId, tableName);
+
+            // 【修复】使用正确的批量插入语法
+            // TDengine 批量插入语法: INSERT INTO table VALUES (...), (...), ...
+            int successCount = insertBatch(tableName, observations);
+
+            totalInsertCount.addAndGet(successCount);
+            logger.info("批量保存卫星观测数据: stationId={}, total={}, success={}",
+                    stationId, observations.size(), successCount);
+
+        } catch (Exception e) {
+            totalErrorCount.incrementAndGet();
+            logger.error("批量保存卫星观测数据失败: stationId={}, error={}", stationId, e.getMessage(), e);
+
+            // 降级为逐条插入
+            for (SatObservation obs : observations) {
+                try {
+                    saveSatObservation(stationId, obs);
+                } catch (Exception ex) {
+                    logger.warn("逐条保存失败: satNo={}", obs.getSatNo());
+                }
+            }
+        }
+    }
+
+    /**
+     * 【修复】批量插入 - 使用正确的 TDengine 批量插入语法
+     */
+    private int insertBatch(String tableName, List<SatObservation> observations) {
+        if (observations == null || observations.isEmpty()) {
+            return 0;
         }
 
-        // 分批插入
-        int totalSize = validObservations.size();
         int successCount = 0;
+        int total = observations.size();
 
-        for (int i = 0; i < totalSize; i += BATCH_INSERT_SIZE) {
-            int end = Math.min(i + BATCH_INSERT_SIZE, totalSize);
-            List<SatObservation> batch = validObservations.subList(i, end);
+        // 分批处理
+        for (int i = 0; i < total; i += batchSize) {
+            int end = Math.min(i + batchSize, total);
+            List<SatObservation> batch = observations.subList(i, end);
 
             try {
-                insertBatchWithRetry(stationId, batch);
-                successCount += batch.size();
-            } catch (Exception e) {
-                logger.error("站点 {} 批量插入失败 [{}/{}]: {}",
-                        stationId, i, totalSize, e.getMessage());
-                errorCount.incrementAndGet();
+                // 【修复】构建正确的批量插入 SQL
+                // TDengine 语法: INSERT INTO table VALUES (v1, v2, ...), (v1, v2, ...)
+                StringBuilder sql = new StringBuilder("INSERT INTO ");
+                sql.append(tableName).append(" VALUES ");
 
-                // 尝试逐条插入
+                List<Object> allParams = new ArrayList<>();
+                boolean first = true;
+
+                for (SatObservation obs : batch) {
+                    if (!first) {
+                        sql.append(", ");
+                    }
+                    first = false;
+
+                    sql.append("(");
+                    sql.append("?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?");
+                    sql.append(")");
+
+                    Collections.addAll(allParams, buildInsertParams(obs));
+                }
+
+                if (!allParams.isEmpty()) {
+                    jdbcTemplate.update(sql.toString(), allParams.toArray());
+                    successCount += batch.size();
+                }
+
+            } catch (Exception e) {
+                logger.error("批量插入失败: batch {}-{}, error={}", i, end, e.getMessage());
+
+                // 降级为逐条插入
                 for (SatObservation obs : batch) {
                     try {
-                        insertSingle(stationId, obs);
+                        String sql = buildInsertSql(tableName);
+                        jdbcTemplate.update(sql, buildInsertParams(obs));
                         successCount++;
                     } catch (Exception ex) {
-                        logger.warn("站点 {} 单条插入失败: satNo={}, error={}",
-                                stationId, obs.getSatNo(), ex.getMessage());
+                        logger.warn("逐条插入失败: satNo={}", obs.getSatNo());
                     }
                 }
             }
         }
 
-        insertCount.addAndGet(successCount);
-        logger.debug("站点 {} 批量保存完成: 成功 {}/{} 条", stationId, successCount, totalSize);
+        return successCount;
     }
 
-    /**
-     * 按时间范围查询观测数据
-     *
-     * @param stationId 站点ID
-     * @param startTime 开始时间
-     * @param endTime   结束时间
-     * @return 观测数据列表
-     */
+    // ==================== 查询方法 ====================
+
     @Override
     public List<SatObservation> queryByTimeRange(String stationId, long startTime, long endTime) {
-        String sql = String.format(
-                "SELECT ts, epoch_time, sat_no, sat_system, elevation, azimuth, snr, " +
-                        "       pseudorange_p1, phase_l1, pseudorange_p2, phase_p2, c1, c2, data_source, " +
-                        "       observation_date, obs_time, obs_unique_key, date_source " +
-                        "FROM %s WHERE station_id = ? AND ts >= ? AND ts < ? ORDER BY ts",
-                SUPER_TABLE);
+        if (stationId == null || startTime <= 0 || endTime <= 0) {
+            return Collections.emptyList();
+        }
 
         try {
-            return jdbcTemplate.query(sql,
+            String tableName = getTableName(stationId);
+            String sql = String.format(
+                    "SELECT * FROM %s WHERE ts >= ? AND ts <= ? ORDER BY ts",
+                    tableName
+            );
+
+            List<SatObservation> result = jdbcTemplate.query(
+                    sql,
                     ps -> {
-                        ps.setString(1, stationId);
-                        ps.setLong(2, startTime);
-                        ps.setLong(3, endTime);
+                        ps.setTimestamp(1, new Timestamp(startTime));
+                        ps.setTimestamp(2, new Timestamp(endTime));
                     },
-                    this::mapRowToObservation);
+                    this::mapRowToObservation
+            );
+
+            totalQueryCount.addAndGet(result.size());
+            return result;
 
         } catch (Exception e) {
-            logger.error("查询观测数据失败: stationId={}, error={}", stationId, e.getMessage());
+            logger.error("查询观测数据失败: stationId={}, error={}", stationId, e.getMessage(), e);
             return Collections.emptyList();
         }
     }
 
-    /**
-     * 按日期查询观测数据
-     *
-     * @param stationId 站点ID
-     * @param date      观测日期
-     * @return 观测数据列表
-     */
     @Override
     public List<SatObservation> queryByDate(String stationId, LocalDate date) {
-        String sql = String.format(
-                "SELECT ts, epoch_time, sat_no, sat_system, elevation, azimuth, snr, " +
-                        "       pseudorange_p1, phase_l1, pseudorange_p2, phase_p2, c1, c2, data_source, " +
-                        "       observation_date, obs_time, obs_unique_key, date_source " +
-                        "FROM %s WHERE station_id = ? AND observation_date = ? ORDER BY ts",
-                SUPER_TABLE);
+        if (stationId == null || date == null) {
+            return Collections.emptyList();
+        }
 
         try {
-            return jdbcTemplate.query(sql,
-                    ps -> {
-                        ps.setString(1, stationId);
-                        ps.setString(2, date.format(DATE_FORMATTER));
-                    },
-                    this::mapRowToObservation);
+            String tableName = getTableName(stationId);
+            String sql = String.format(
+                    "SELECT * FROM %s WHERE observation_date = ? ORDER BY ts",
+                    tableName
+            );
+
+            List<SatObservation> result = jdbcTemplate.query(
+                    sql,
+                    ps -> ps.setString(1, date.format(DATE_FORMATTER)),
+                    this::mapRowToObservation
+            );
+
+            totalQueryCount.addAndGet(result.size());
+            return result;
 
         } catch (Exception e) {
             logger.error("按日期查询观测数据失败: stationId={}, date={}, error={}",
-                    stationId, date, e.getMessage());
+                    stationId, date, e.getMessage(), e);
             return Collections.emptyList();
         }
     }
 
-    /**
-     * 按唯一键查询观测数据
-     *
-     * @param stationId    站点ID
-     * @param obsUniqueKey 唯一键
-     * @return 观测数据
-     */
     @Override
     public SatObservation queryByUniqueKey(String stationId, String obsUniqueKey) {
-        String sql = String.format(
-                "SELECT ts, epoch_time, sat_no, sat_system, elevation, azimuth, snr, " +
-                        "       pseudorange_p1, phase_l1, pseudorange_p2, phase_p2, c1, c2, data_source, " +
-                        "       observation_date, obs_time, obs_unique_key, date_source " +
-                        "FROM %s WHERE station_id = ? AND obs_unique_key = ?",
-                SUPER_TABLE);
+        if (stationId == null || obsUniqueKey == null || obsUniqueKey.isEmpty()) {
+            return null;
+        }
 
         try {
-            List<SatObservation> results = jdbcTemplate.query(sql,
-                    ps -> {
-                        ps.setString(1, stationId);
-                        ps.setString(2, obsUniqueKey);
-                    },
-                    this::mapRowToObservation);
+            String tableName = getTableName(stationId);
+            String sql = String.format(
+                    "SELECT * FROM %s WHERE obs_unique_key = ? LIMIT 1",
+                    tableName
+            );
 
-            return results.isEmpty() ? null : results.get(0);
+            List<SatObservation> result = jdbcTemplate.query(
+                    sql,
+                    ps -> ps.setString(1, obsUniqueKey),
+                    this::mapRowToObservation
+            );
+
+            if (!result.isEmpty()) {
+                totalQueryCount.incrementAndGet();
+                return result.get(0);
+            }
+
+            return null;
 
         } catch (Exception e) {
-            logger.error("按唯一键查询观测数据失败: key={}, error={}", obsUniqueKey, e.getMessage());
+            logger.error("按唯一键查询观测数据失败: stationId={}, key={}, error={}",
+                    stationId, obsUniqueKey, e.getMessage(), e);
             return null;
         }
     }
 
-    /**
-     * 删除指定时间范围的数据
-     *
-     * @param stationId 站点ID
-     * @param startTime 开始时间
-     * @param endTime   结束时间
-     * @return 删除条数
-     */
+    // ==================== 删除方法 ====================
+
     @Override
     public int deleteByTimeRange(String stationId, long startTime, long endTime) {
-        String sql = String.format(
-                "DELETE FROM %s WHERE station_id = ? AND ts >= ? AND ts < ?",
-                SUPER_TABLE);
+        if (stationId == null || startTime <= 0 || endTime <= 0) {
+            return 0;
+        }
 
         try {
-            return jdbcTemplate.update(sql, stationId, startTime, endTime);
+            String tableName = getTableName(stationId);
+            String sql = String.format("DELETE FROM %s WHERE ts >= ? AND ts <= ?", tableName);
+
+            return jdbcTemplate.update(
+                    sql,
+                    new Timestamp(startTime),
+                    new Timestamp(endTime)
+            );
+
         } catch (Exception e) {
-            logger.error("删除观测数据失败: stationId={}, error={}", stationId, e.getMessage());
+            logger.error("删除观测数据失败: stationId={}, error={}", stationId, e.getMessage(), e);
             return 0;
         }
     }
 
-    /**
-     * 获取统计信息
-     *
-     * @return 统计信息字符串
-     */
+    // ==================== 统计方法 ====================
+
     @Override
     public String getStatistics() {
-        return String.format("插入=%d, 错误=%d, 去重=%d",
-                insertCount.get(), errorCount.get(), dedupCount.get());
+        return String.format(
+                "总插入: %d, 总查询: %d, 总错误: %d, 已创建表: %d",
+                totalInsertCount.get(), totalQueryCount.get(), totalErrorCount.get(), createdTables.size()
+        );
     }
 
     // ==================== 私有方法 ====================
 
     /**
-     * 预处理观测数据
+     * 【修复】预处理观测数据 - 不再调用私有方法
+     *
+     * 原代码调用了私有方法：
+     * - obs.calculateObsUniqueKey()
+     * - obs.calculateFullTimestamp()
+     *
+     * 修复方案：直接设置必要的字段
      */
-    private List<SatObservation> preprocessObservations(String stationId, List<SatObservation> observations) {
-        List<SatObservation> valid = new ArrayList<>();
-
-        for (SatObservation obs : observations) {
-            // 校验必填字段
-            if (obs.getSatNo() == null || obs.getSatNo().isEmpty()) {
-                logger.warn("卫星编号为空，跳过: {}", obs);
-                continue;
-            }
-
-            // 设置站点ID
-            if (obs.getStationId() == null) {
-                obs.setStationId(stationId);
-            }
-
-            // 设置时间戳
-            if (obs.getTimestamp() == null) {
-                obs.setTimestamp(System.currentTimeMillis());
-            }
-
-            // 计算唯一键
-            if (obs.getObsUniqueKey() == null || obs.getObsUniqueKey().isEmpty()) {
-                obs.calculateObsUniqueKey();
-            }
-
-            // 计算完整时间戳
-            if (obs.getFullTimestamp() == null) {
-                obs.calculateFullTimestamp();
-            }
-
-            // 设置默认日期
-            if (obs.getObservationDate() == null) {
-                obs.setObservationDate(LocalDate.now());
-                obs.setDateSource("SYSTEM");
-                logger.debug("观测数据缺少日期，使用系统日期: satNo={}", obs.getSatNo());
-            }
-
-            valid.add(obs);
+    private void preprocessObservation(SatObservation obs) {
+        if (obs == null) {
+            return;
         }
 
-        return valid;
-    }
-
-    /**
-     * 去重处理
-     */
-    private List<SatObservation> deduplicateObservations(List<SatObservation> observations) {
-        Map<String, SatObservation> uniqueMap = new LinkedHashMap<>();
-
-        for (SatObservation obs : observations) {
-            String key = obs.getObsUniqueKey();
-            if (key == null) {
-                continue;
-            }
-
-            SatObservation existing = uniqueMap.get(key);
-            if (existing == null) {
-                uniqueMap.put(key, obs);
-            } else {
-                // 合并数据：保留非空值
-                mergeObservation(existing, obs);
-                dedupCount.incrementAndGet();
-            }
+        // 【修复】设置唯一键 - 不调用私有方法
+        if (obs.getObsUniqueKey() == null || obs.getObsUniqueKey().isEmpty()) {
+            String uniqueKey = generateObsUniqueKey(obs);
+            obs.setObsUniqueKey(uniqueKey);
         }
 
-        return new ArrayList<>(uniqueMap.values());
-    }
+        // 【修复】设置完整时间戳 - 不调用私有方法
+        if (obs.getTimestamp() == null) {
+            obs.setTimestamp(System.currentTimeMillis());
+        }
 
-    /**
-     * 合并观测数据（保留非空值）
-     */
-    private void mergeObservation(SatObservation target, SatObservation source) {
-        if (target.getElevation() == null && source.getElevation() != null) {
-            target.setElevation(source.getElevation());
-        }
-        if (target.getAzimuth() == null && source.getAzimuth() != null) {
-            target.setAzimuth(source.getAzimuth());
-        }
-        if (target.getSnr() == null && source.getSnr() != null) {
-            target.setSnr(source.getSnr());
-        }
-        if (target.getPseudorangeP1() == null && source.getPseudorangeP1() != null) {
-            target.setPseudorangeP1(source.getPseudorangeP1());
-        }
-        if (target.getPhaseL1() == null && source.getPhaseL1() != null) {
-            target.setPhaseL1(source.getPhaseL1());
-        }
-        if (target.getPseudorangeP2() == null && source.getPseudorangeP2() != null) {
-            target.setPseudorangeP2(source.getPseudorangeP2());
-        }
-        if (target.getPhaseP2() == null && source.getPhaseP2() != null) {
-            target.setPhaseP2(source.getPhaseP2());
+        // 设置观测日期
+        if (obs.getObservationDate() == null) {
+            obs.setObservationDate(LocalDate.now(ZoneOffset.UTC), SatObservation.DATE_SOURCE_SYSTEM);
         }
     }
 
     /**
-     * 批量插入（带重试）
+     * 生成观测唯一键
      */
-    private void insertBatchWithRetry(String stationId, List<SatObservation> observations) {
-        Exception lastException = null;
+    private String generateObsUniqueKey(SatObservation obs) {
+        StringBuilder sb = new StringBuilder();
 
-        for (int retry = 0; retry < MAX_RETRY_COUNT; retry++) {
+        // 日期
+        if (obs.getObservationDate() != null) {
+            sb.append(obs.getObservationDate().format(DATE_FORMATTER));
+        } else {
+            sb.append("unknown");
+        }
+        sb.append("_");
+
+        // 时间
+        if (obs.getObservationTime() != null) {
+            sb.append(obs.getObservationTime().format(DateTimeFormatter.ofPattern("HHmmssSSS")));
+        } else if (obs.getEpochTime() != null) {
+            sb.append(obs.getEpochTime());
+        } else {
+            sb.append("unknown");
+        }
+        sb.append("_");
+
+        // 卫星编号
+        if (obs.getSatNo() != null) {
+            sb.append(obs.getSatNo());
+        } else {
+            sb.append("unknown");
+        }
+
+        return sb.toString();
+    }
+
+    /**
+     * 获取子表名
+     */
+    private String getTableName(String stationId) {
+        // 替换特殊字符
+        String safeId = stationId.replaceAll("[^a-zA-Z0-9_]", "_");
+        return superTable + "_" + safeId;
+    }
+
+    /**
+     * 【修复】确保子表存在 - 原代码缺少此逻辑
+     */
+    private void ensureTableExists(String stationId, String tableName) {
+        if (createdTables.contains(tableName)) {
+            return;
+        }
+
+        try {
+            // 检查表是否存在
+            String checkSql = String.format("SHOW TABLES LIKE '%s'", tableName);
+            List<Map<String, Object>> tables = jdbcTemplate.queryForList(checkSql);
+
+            if (tables.isEmpty()) {
+                // 创建子表
+                createSubTable(stationId, tableName);
+            }
+
+            createdTables.add(tableName);
+
+        } catch (Exception e) {
+            logger.warn("检查/创建子表失败: tableName={}, error={}", tableName, e.getMessage());
+            // 尝试直接创建
             try {
-                insertBatch(stationId, observations);
-                return;
-            } catch (Exception e) {
-                lastException = e;
-                if (retry < MAX_RETRY_COUNT - 1) {
-                    try {
-                        Thread.sleep(RETRY_INTERVAL_MS * (retry + 1));
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
-                }
+                createSubTable(stationId, tableName);
+                createdTables.add(tableName);
+            } catch (Exception ex) {
+                logger.error("创建子表失败: tableName={}", tableName, ex);
             }
         }
-
-        throw new RuntimeException("批量插入失败: " + lastException.getMessage(), lastException);
     }
 
     /**
-     * 批量插入
+     * 创建超级表（如果不存在）
      */
-    private void insertBatch(String stationId, List<SatObservation> observations) {
-        // 构建批量插入SQL
-        // TDengine 使用 INSERT INTO ... VALUES 语法
-        StringBuilder sql = new StringBuilder();
-        sql.append("INSERT INTO ");
-
-        for (int i = 0; i < observations.size(); i++) {
-            SatObservation obs = observations.get(i);
-            String tableName = getSubTableName(stationId, obs.getSatNo());
-
-            if (i > 0) {
-                sql.append(" ");
-            }
-
-            sql.append(tableName).append(" VALUES (");
-
-            // ts - 时间戳
-            sql.append(obs.getTimestamp());
-
-            // epoch_time - 历元时间
-            sql.append(", ").append(obs.getEpochTime() != null ? obs.getEpochTime() : "NULL");
-
-            // sat_no - 卫星编号
-            sql.append(", '").append(escapeString(obs.getSatNo())).append("'");
-
-            // sat_system - 卫星系统
-            sql.append(", '").append(escapeString(obs.getSatSystem())).append("'");
-
-            // elevation - 仰角
-            sql.append(", ").append(formatDouble(obs.getElevation()));
-
-            // azimuth - 方位角
-            sql.append(", ").append(formatDouble(obs.getAzimuth()));
-
-            // snr - 信噪比
-            sql.append(", ").append(formatDouble(obs.getSnr()));
-
-            // pseudorange_p1 - 伪距P1
-            sql.append(", ").append(formatDouble(obs.getPseudorangeP1()));
-
-            // phase_l1 - 相位L1
-            sql.append(", ").append(formatDouble(obs.getPhaseL1()));
-
-            // pseudorange_p2 - 伪距P2
-            sql.append(", ").append(formatDouble(obs.getPseudorangeP2()));
-
-            // phase_p2 - 相位P2
-            sql.append(", ").append(formatDouble(obs.getPhaseP2()));
-
-            // c1 - 信号代码1
-            sql.append(", '").append(escapeString(obs.getC1())).append("'");
-
-            // c2 - 信号代码2
-            sql.append(", '").append(escapeString(obs.getC2())).append("'");
-
-            // data_source - 数据来源
-            sql.append(", '").append(escapeString(obs.getDataSource())).append("'");
-
-            // 【新增】observation_date - 观测日期
-            sql.append(", '").append(obs.getObservationDate().format(DATE_FORMATTER)).append("'");
-
-            // 【新增】obs_time - 观测时间
-            sql.append(", '").append(formatObsTime(obs.getObsTime())).append("'");
-
-            // 【新增】obs_unique_key - 唯一键
-            sql.append(", '").append(escapeString(obs.getObsUniqueKey())).append("'");
-
-            // 【新增】date_source - 日期来源
-            sql.append(", '").append(escapeString(obs.getDateSource())).append("'");
-
-            sql.append(")");
-        }
-
-        jdbcTemplate.execute(sql.toString());
-    }
-
-    /**
-     * 单条插入
-     */
-    private void insertSingle(String stationId, SatObservation obs) {
-        String tableName = getSubTableName(stationId, obs.getSatNo());
-
+    private void createSuperTableIfNotExists() {
         String sql = String.format(
-                "INSERT INTO %s VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                tableName);
+                "CREATE STABLE IF NOT EXISTS %s.%s (" +
+                        "ts TIMESTAMP, " +
+                        "epoch_time BIGINT, " +
+                        "sat_no NCHAR(16), " +
+                        "sat_system NCHAR(16), " +
+                        "elevation DOUBLE, " +
+                        "azimuth DOUBLE, " +
+                        "snr DOUBLE, " +
+                        "pseudorange_p1 DOUBLE, " +
+                        "phase_l1 DOUBLE, " +
+                        "pseudorange_p2 DOUBLE, " +
+                        "phase_p2 DOUBLE, " +
+                        "c1 NCHAR(16), " +
+                        "c2 NCHAR(16), " +
+                        "data_source NCHAR(16), " +
+                        "observation_date NCHAR(16), " +
+                        "obs_time NCHAR(16), " +
+                        "obs_unique_key NCHAR(64), " +
+                        "date_source NCHAR(16)" +
+                        ") TAGS (station_id NCHAR(64))",
+                database, superTable
+        );
 
-        jdbcTemplate.update(sql,
-                obs.getTimestamp(),
-                obs.getEpochTime(),
-                obs.getSatNo(),
-                obs.getSatSystem(),
-                obs.getElevation(),
-                obs.getAzimuth(),
-                obs.getSnr(),
-                obs.getPseudorangeP1(),
-                obs.getPhaseL1(),
-                obs.getPseudorangeP2(),
-                obs.getPhaseP2(),
-                obs.getC1(),
-                obs.getC2(),
-                obs.getDataSource(),
-                obs.getObservationDate().format(DATE_FORMATTER),
-                formatObsTime(obs.getObsTime()),
-                obs.getObsUniqueKey(),
-                obs.getDateSource()
+        try {
+            jdbcTemplate.execute(sql);
+            logger.info("超级表已创建/确认: {}", superTable);
+        } catch (Exception e) {
+            logger.error("创建超级表失败: {}", superTable, e);
+        }
+    }
+
+    /**
+     * 创建子表
+     */
+    private void createSubTable(String stationId, String tableName) {
+        String sql = String.format(
+                "CREATE TABLE IF NOT EXISTS %s USING %s.%s TAGS ('%s')",
+                tableName, database, superTable, stationId
+        );
+
+        jdbcTemplate.execute(sql);
+        logger.info("子表已创建: {}", tableName);
+    }
+
+    /**
+     * 构建插入 SQL
+     */
+    private String buildInsertSql(String tableName) {
+        return String.format(
+                "INSERT INTO %s VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                tableName
         );
     }
 
     /**
-     * 获取子表名称
+     * 构建插入参数
      */
-    private String getSubTableName(String stationId, String satNo) {
-        // 使用站点ID和卫星编号组合作为子表名
-        // 格式：t_obs_{stationId}_{satNo}
-        String safeStationId = sanitizeTableName(stationId);
-        String safeSatNo = sanitizeTableName(satNo);
-        return String.format("t_obs_%s_%s", safeStationId, safeSatNo);
+    private Object[] buildInsertParams(SatObservation obs) {
+        Object[] params = new Object[17];
+
+        // ts - 主时间戳
+        params[0] = obs.getTimestamp() != null ? new Timestamp(obs.getTimestamp()) : new Timestamp(System.currentTimeMillis());
+
+        // epoch_time - 历元时间
+        params[1] = obs.getEpochTime() != null ? obs.getEpochTime() : 0L;
+
+        // sat_no - 卫星编号
+        params[2] = obs.getSatNo() != null ? obs.getSatNo() : "";
+
+        // sat_system - 卫星系统
+        params[3] = obs.getSatSystem() != null ? obs.getSatSystem() : "";
+
+        // elevation - 仰角
+        params[4] = obs.getElevation() != null ? obs.getElevation() : 0.0;
+
+        // azimuth - 方位角
+        params[5] = obs.getAzimuth() != null ? obs.getAzimuth() : 0.0;
+
+        // snr - 信噪比
+        params[6] = obs.getSnr() != null ? obs.getSnr() : 0.0;
+
+        // pseudorange_p1 - 伪距P1
+        params[7] = obs.getPseudorangeP1() != null ? obs.getPseudorangeP1() : 0.0;
+
+        // phase_l1 - 载波相位L1
+        params[8] = obs.getPhaseL1() != null ? obs.getPhaseL1() : 0.0;
+
+        // pseudorange_p2 - 伪距P2
+        params[9] = obs.getPseudorangeP2() != null ? obs.getPseudorangeP2() : 0.0;
+
+        // phase_p2 - 载波相位P2
+        params[10] = obs.getPhaseP2() != null ? obs.getPhaseP2() : 0.0;
+
+        // c1 - 信号代码1
+        params[11] = obs.getC1() != null ? obs.getC1() : "";
+
+        // c2 - 信号代码2
+        params[12] = obs.getC2() != null ? obs.getC2() : "";
+
+        // data_source - 数据来源
+        params[13] = obs.getDataSource() != null ? obs.getDataSource() : "";
+
+        // observation_date - 观测日期
+        params[14] = obs.getObservationDate() != null ? obs.getObservationDate().format(DATE_FORMATTER) : "";
+
+        // obs_time - 观测时间
+        params[15] = obs.getObservationTime() != null ? obs.getObservationTime().format(TIME_FORMATTER) : "";
+
+        // obs_unique_key - 唯一键
+        params[16] = obs.getObsUniqueKey() != null ? obs.getObsUniqueKey() : "";
+
+        return params;
     }
 
     /**
-     * 清理表名（移除特殊字符）
+     * 【修复】映射 ResultSet 到 SatObservation
+     *
+     * 原代码问题：
+     * - BUG-5: setObsTime() 方法不存在，应为 setObservationTime()
+     * - BUG-6: epoch_time NULL 值处理不当
      */
-    private String sanitizeTableName(String name) {
-        if (name == null) {
-            return "unknown";
-        }
-        return name.replaceAll("[^a-zA-Z0-9_]", "_");
-    }
-
-    /**
-     * 转义字符串
-     */
-    private String escapeString(String s) {
-        if (s == null) {
-            return "";
-        }
-        return s.replace("'", "''");
-    }
-
-    /**
-     * 格式化 Double 值
-     */
-    private String formatDouble(Double d) {
-        if (d == null) {
-            return "NULL";
-        }
-        return String.format("%.6f", d);
-    }
-
-    /**
-     * 格式化观测时间
-     */
-    private String formatObsTime(java.time.LocalTime time) {
-        if (time == null) {
-            return "00:00:00.000";
-        }
-        return time.format(TIME_FORMATTER);
-    }
-
-    /**
-     * 将 ResultSet 映射为 SatObservation 对象
-     */
-    private SatObservation mapRowToObservation(java.sql.ResultSet rs, int rowNum) throws SQLException {
+    private SatObservation mapRowToObservation(ResultSet rs, int rowNum) throws SQLException {
         SatObservation obs = new SatObservation();
 
-        obs.setTimestamp(rs.getLong("ts"));
-        obs.setEpochTime(rs.getLong("epoch_time"));
+        // ts
+        Timestamp ts = rs.getTimestamp("ts");
+        if (ts != null) {
+            obs.setTimestamp(ts.getTime());
+        }
+
+        // 【修复】epoch_time - 正确处理 NULL 值
+        long epochTime = rs.getLong("epoch_time");
+        if (!rs.wasNull()) {
+            obs.setEpochTime(epochTime);
+        } else {
+            obs.setEpochTime(null);
+        }
+
         obs.setSatNo(rs.getString("sat_no"));
         obs.setSatSystem(rs.getString("sat_system"));
         obs.setElevation(rs.getDouble("elevation"));
@@ -607,15 +645,24 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
         obs.setC2(rs.getString("c2"));
         obs.setDataSource(rs.getString("data_source"));
 
-        // 【新增】日期字段
+        // observation_date
         String dateStr = rs.getString("observation_date");
         if (dateStr != null && !dateStr.isEmpty()) {
-            obs.setObservationDate(LocalDate.parse(dateStr, DATE_FORMATTER));
+            try {
+                obs.setObservationDate(LocalDate.parse(dateStr, DATE_FORMATTER));
+            } catch (Exception e) {
+                logger.warn("解析日期失败: {}", dateStr);
+            }
         }
 
+        // 【修复】obs_time - 使用正确的方法名 setObservationTime
         String timeStr = rs.getString("obs_time");
         if (timeStr != null && !timeStr.isEmpty()) {
-            obs.setObsTime(java.time.LocalTime.parse(timeStr, TIME_FORMATTER));
+            try {
+                obs.setObservationTime(LocalTime.parse(timeStr, TIME_FORMATTER));
+            } catch (Exception e) {
+                logger.warn("解析时间失败: {}", timeStr);
+            }
         }
 
         obs.setObsUniqueKey(rs.getString("obs_unique_key"));
