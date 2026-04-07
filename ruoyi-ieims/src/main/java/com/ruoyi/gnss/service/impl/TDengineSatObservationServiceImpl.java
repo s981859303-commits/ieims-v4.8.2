@@ -75,10 +75,6 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
         log.info("✅ 创建/确认卫星观测超级表完成: {}", STABLE_NAME);
     }
 
-    // =========================================================================
-    // 🔥 核心数据写入实现 (覆盖 ISatObservationStorageService 接口)
-    // =========================================================================
-
     @Override
     public void saveSatObservation(String stationId, SatObservation observation) {
         if (observation != null) {

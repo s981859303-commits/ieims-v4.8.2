@@ -98,11 +98,11 @@ public class TDengineNmeaStorageServiceImpl implements INmeaStorageService {
 
             initTables();
             initialized = true;
-            logger.info("TDengine NMEA 存储服务初始化成功 - database: {}, 默认站点: {}, 默认表: {}",
+            logger.info("✅ TDengine NMEA 存储服务初始化成功 - database: {}, 默认站点: {}, 默认表: {}",
                     database, defaultStationId, cachedDefaultTableName);
         } catch (Exception e) {
             initialized = false;
-            logger.error("TDengine NMEA 存储服务初始化失败: {}", e.getMessage(), e);
+            logger.error("❌ TDengine NMEA 存储服务初始化失败: {}", e.getMessage(), e);
         }
     }
 
@@ -116,9 +116,11 @@ public class TDengineNmeaStorageServiceImpl implements INmeaStorageService {
      * </p>
      */
     private void initTables() {
-        // 【修复】使用 useDatabase 替代直接执行 USE 语句
-        tdengineUtil.useDatabase(database);
-
+        try {
+            tdengineUtil.executeDDL("CREATE DATABASE IF NOT EXISTS " + database);
+        } catch (Exception e) {
+            logger.debug("尝试建库失败 (可能已存在或无权限): {}", e.getMessage());
+        }
         // 创建超级表
         String createStableSql = String.format(
                 "CREATE STABLE IF NOT EXISTS %s (" +

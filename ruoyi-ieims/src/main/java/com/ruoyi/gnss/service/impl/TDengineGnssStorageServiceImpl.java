@@ -65,9 +65,12 @@ public class TDengineGnssStorageServiceImpl implements IGnssStorageService {
      * </p>
      */
     private void initTables() {
-        // 【修复】使用 useDatabase 替代直接执行 USE 语句
-        // useDatabase 会先确保数据库存在，然后再切换
-        tdengineUtil.useDatabase(database);
+// 防止数据库不存在导致建表崩溃，使用兼容性更好的简单SQL替代 tdengineUtil.useDatabase
+        try {
+            tdengineUtil.executeDDL("CREATE DATABASE IF NOT EXISTS " + database);
+        } catch (Exception e) {
+            logger.debug("尝试建库失败 (可能已存在或无权限): {}", e.getMessage());
+        }
 
         // 创建超级表
         String createStableSql = String.format(

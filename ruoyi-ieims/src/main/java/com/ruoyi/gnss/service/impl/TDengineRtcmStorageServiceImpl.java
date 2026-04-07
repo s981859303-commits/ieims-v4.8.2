@@ -32,7 +32,6 @@ public class TDengineRtcmStorageServiceImpl implements IRtcmStorageService {
     private String stationId;
 
     private static final String STABLE_RTCM_RAW = "st_rtcm_raw";
-    private static final String STABLE_SAT_OBS = "st_satellite_obs";
 
     @Resource
     private TDengineUtil tdengineUtil;
@@ -56,7 +55,7 @@ public class TDengineRtcmStorageServiceImpl implements IRtcmStorageService {
         try {
             initTables();
             initialized = true;
-            logger.info("✅ TDengine RTCM 存储服务初始化成功 (支持星空数据融合)");
+            logger.info("✅ TDengine RTCM 存储服务初始化成功 ");
         } catch (Exception e) {
             logger.error("❌ TDengine RTCM 存储服务初始化失败: {}", e.getMessage());
         }
@@ -65,7 +64,9 @@ public class TDengineRtcmStorageServiceImpl implements IRtcmStorageService {
     private void initTables() {
         try {
             tdengineUtil.executeDDL("CREATE DATABASE IF NOT EXISTS " + database);
-        } catch (Exception ignored) {}
+        } catch (Exception e) {
+            logger.debug("尝试建库失败 (可能已存在或无权限): {}", e.getMessage());
+        }
 
         String createRtcmStableSql = String.format(
                 "CREATE STABLE IF NOT EXISTS %s (" +
@@ -75,16 +76,6 @@ public class TDengineRtcmStorageServiceImpl implements IRtcmStorageService {
         );
         tdengineUtil.executeDDL(createRtcmStableSql);
 
-        String createSatObsStableSql = String.format(
-                "CREATE STABLE IF NOT EXISTS %s (" +
-                        "ts TIMESTAMP, obs_time VARCHAR(30), c1 VARCHAR(10), c2 VARCHAR(10), " +
-                        "p1 DOUBLE, p2 DOUBLE, l1 DOUBLE, l2 DOUBLE, s1 DOUBLE, " +
-                        "elevation DOUBLE, azimuth DOUBLE" +
-                        ") TAGS (station_id VARCHAR(50), sat_name VARCHAR(10))",
-                STABLE_SAT_OBS
-        );
-        tdengineUtil.executeDDL(createSatObsStableSql);
-
         String rtcmTable = "rtcm_" + sanitizeTableName(stationId);
         tdengineUtil.executeDDL(String.format(
                 "CREATE TABLE IF NOT EXISTS %s USING %s TAGS ('%s')",
@@ -92,9 +83,7 @@ public class TDengineRtcmStorageServiceImpl implements IRtcmStorageService {
         ));
     }
 
-    // ==========================================
-    // 🔥 核心修复：实现接口要求的抽象方法
-    // ==========================================
+
     @Override
     public boolean isInitialized() {
         return this.initialized;
@@ -118,46 +107,6 @@ public class TDengineRtcmStorageServiceImpl implements IRtcmStorageService {
         }
     }
 
-    @Async("gnssThreadPool")
-    public void saveSatelliteObsBatch(long timestamp, List<ObsData> obsList) {
-        if (!initialized || obsList == null || obsList.isEmpty()) return;
-
-        // 统一添加 500 条分片策略，避免长度越界
-        int batchSize = 500;
-        for (int i = 0; i < obsList.size(); i += batchSize) {
-            int end = Math.min(i + batchSize, obsList.size());
-            executeSubBatch(timestamp, obsList.subList(i, end));
-        }
-    }
-
-    private void executeSubBatch(long timestamp, List<ObsData> subList) {
-        try {
-            StringBuilder sqlBuilder = new StringBuilder("INSERT INTO ");
-            String sanitizedStationId = sanitizeTableName(stationId);
-
-            for (ObsData obs : subList) {
-                String tableName = "satobs_" + sanitizedStationId + "_" + sanitizeTableName(obs.satName);
-                sqlBuilder.append(String.format(Locale.US,
-                        "%s USING %s TAGS ('%s', '%s') VALUES (%d, '%s', '%s', '%s', %f, %f, %f, %f, %f, %f, %f) ",
-                        tableName, STABLE_SAT_OBS, stationId, obs.satName,
-                        timestamp,
-                        obs.obsTime != null ? obs.obsTime : "",
-                        obs.c1 != null ? obs.c1 : "",
-                        obs.c2 != null ? obs.c2 : "",
-                        obs.p1 != null ? obs.p1 : 0.0,
-                        obs.p2 != null ? obs.p2 : 0.0,
-                        obs.l1 != null ? obs.l1 : 0.0,
-                        obs.l2 != null ? obs.l2 : 0.0,
-                        obs.s1 != null ? obs.s1 : 0.0,
-                        obs.elevation != null ? obs.elevation : 0.0,
-                        obs.azimuth != null ? obs.azimuth : 0.0
-                ));
-            }
-            tdengineUtil.executeUpdate(sqlBuilder.toString());
-        } catch (Exception e) {
-            logger.error("❌ 批量存储卫星观测数据失败: {}", e.getMessage());
-        }
-    }
 
     private String sanitizeTableName(String name) {
         if (name == null) return "unknown";
