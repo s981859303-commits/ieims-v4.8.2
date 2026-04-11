@@ -145,15 +145,35 @@ public class GnssMqttService implements MqttCallbackExtended {
                 return;
             }
 
-            logger.debug("收到 MQTT 消息，长度: {} 字节", rawBytes.length);
+            // 1. 从 MQTT Topic 中动态提取站点 ID
+            // 例如 topic 为 "ieims/gnss/data/8900_2"，截取最后一段得到 "8900_2"
+            String stationId = extractStationIdFromTopic(topic);
+
+            logger.debug("收到 MQTT 消息，站点: {}, 长度: {} 字节", stationId, rawBytes.length);
 
             if (splitter != null) {
-                splitter.pushData(rawBytes);
+                // 2. 将站点上下文绑定到当前线程（防御性编程，配合你代码里的 StationContext）
+                StationContext.runWithStation(stationId, () -> {
+                    // 3. 调用带 stationId 参数的 pushData 方法
+                    splitter.pushDataWithStation(stationId, rawBytes);
+                });
             }
 
-        } catch (Exception e) {
-            logger.error("MQTT 消息处理异常: {}", e.getMessage());
+        } catch (Throwable t) {
+            logger.error("MQTT 消息处理发生致命异常 (已拦截，保护监听线程): {}", t.getMessage(), t);
         }
+    }
+
+    /**
+     * 辅助方法：从 Topic 中提取站点 ID
+     */
+    private String extractStationIdFromTopic(String topic) {
+        if (topic != null && topic.contains("/")) {
+            // 截取最后一个 '/' 之后的内容作为 stationId
+            return topic.substring(topic.lastIndexOf('/') + 1);
+        }
+        // 如果解析失败，回退到默认站点
+        return "default_station";
     }
 
     @Override

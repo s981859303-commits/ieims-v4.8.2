@@ -15,6 +15,7 @@ import javax.annotation.Resource;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.Locale;
 
 /**
  * TDengine NMEA 存储服务实现
@@ -165,12 +166,13 @@ public class TDengineNmeaStorageServiceImpl implements INmeaStorageService {
 
             String nmeaType = extractNmeaType(record.getRawContent());
 
-            String insertSql = String.format(
-                    "INSERT INTO %s (ts, nmea_type, raw_content) VALUES (?, ?, ?)",
-                    tableName
+            String insertSql = String.format(Locale.US,
+                    "INSERT INTO %s USING %s TAGS ('%s') VALUES (%d, '%s', '%s')",
+                    tableName, STABLE_NAME, stationId, timestamp, nmeaType, record.getRawContent()
             );
 
-            tdengineUtil.executeUpdate(insertSql, timestamp, nmeaType, record.getRawContent());
+            tdengineUtil.executeUpdate(insertSql);
+
             savedCount.incrementAndGet();
 
             if (logger.isTraceEnabled()) {
@@ -203,32 +205,29 @@ public class TDengineNmeaStorageServiceImpl implements INmeaStorageService {
             String tableName = getTableName(stationId);
             long currentTime = System.currentTimeMillis();
 
-            String sql = String.format("INSERT INTO %s (ts, nmea_type, raw_content) VALUES (?, ?, ?)", tableName);
-
-            List<Object[]> batchArgs = new ArrayList<>(records.size());
+            // 修复：改用 StringBuilder 手动拼接批量 SQL (多表/多行插入语法)
+            StringBuilder sqlBuilder = new StringBuilder("INSERT INTO ");
+            int count = 0;
 
             for (NmeaRecord record : records) {
-                if (record == null || record.getRawContent() == null) {
-                    continue;
-                }
+                if (record == null || record.getRawContent() == null) continue;
 
-                long timestamp = record.getReceivedTime() != null ?
-                        record.getReceivedTime().getTime() : currentTime;
+                long timestamp = record.getReceivedTime() != null ? record.getReceivedTime().getTime() : currentTime;
                 String nmeaType = extractNmeaType(record.getRawContent());
 
-                batchArgs.add(new Object[]{timestamp, nmeaType, record.getRawContent()});
+                sqlBuilder.append(String.format(Locale.US,
+                        "%s USING %s TAGS ('%s') VALUES (%d, '%s', '%s') ",
+                        tableName, STABLE_NAME, stationId, timestamp, nmeaType, record.getRawContent()
+                ));
+                count++;
             }
 
-            if (!batchArgs.isEmpty()) {
-                jdbcTemplate.batchUpdate(sql, batchArgs);
-
-                int successCount = batchArgs.size();
-                savedCount.addAndGet(successCount);
+            if (count > 0) {
+                tdengineUtil.executeUpdate(sqlBuilder.toString());
+                savedCount.addAndGet(count);
                 batchSavedCount.incrementAndGet();
-
-                return successCount;
+                return count;
             }
-
             return 0;
 
         } catch (Exception e) {

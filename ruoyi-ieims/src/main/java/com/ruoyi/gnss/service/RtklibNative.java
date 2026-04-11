@@ -1,4 +1,3 @@
-// 文件路径：ieims-v4.8.2/ruoyi-ieims/src/main/java/com/ruoyi/gnss/service/RtklibNative.java
 package com.ruoyi.gnss.service;
 
 import com.sun.jna.Library;
@@ -15,8 +14,6 @@ import com.sun.jna.Pointer;
  * 3. 保留旧接口以兼容现有代码
  * 4. 函数名与DLL导出名完全一致
  *
- * @author GNSS Team
- * @date 2026-03-27
  */
 public interface RtklibNative extends Library {
 
@@ -132,21 +129,6 @@ public interface RtklibNative extends Library {
      * @return 0 成功，-1 失败
      */
     int rtklib_get_context_stats(Pointer handle, ContextStats.ByReference stats);
-
-    // ==================== 兼容旧接口（已废弃） ====================
-
-    /**
-     * 调用 C 函数解析 RTCM 数据（旧接口，使用全局静态 Context）
-     *
-     * @deprecated 建议使用 rtklib_parse_rtcm_frame_ex
-     * @param buff 输入的二进制 RTCM 数据
-     * @param len 数据长度
-     * @param outObs 输出的观测值数组（内存由 Java 分配）
-     * @param maxObs 数组最大容量（防止 C 代码写越界）
-     * @return 解析出的卫星数量
-     */
-    @Deprecated
-    int parse_rtcm_frame(byte[] buff, int len, JavaObs.ByReference outObs, int maxObs);
 
     // ==================== 辅助方法 ====================
 

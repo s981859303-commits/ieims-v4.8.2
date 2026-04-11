@@ -86,7 +86,7 @@ mqtt:
 # TDengine + Druid 配置（module1 专属）
 tdengine:
   # 3.x 版本推荐使用 RESTful 连接方式
-  url: jdbc:TAOS-RS://127.0.0.1:6041/ieims?charset=utf-8&locale=en_US.UTF-8
+  url: jdbc:TAOS-RS://10.60.117.10:6041/ieims?charset=utf-8&locale=en_US.UTF-8
   driver-class-name: com.taosdata.jdbc.rs.RestfulDriver
 
   # 原生 JDBC URL（替换 RS 为原生驱动，端口 6030）  taos -u root -pGuet@90-= -d ieims   dbev jdbc:TAOS://127.0.0.1:6030/ieims?charset=utf-8&locale=en_US.UTF-8

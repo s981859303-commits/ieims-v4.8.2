@@ -10,9 +10,10 @@ import com.ruoyi.gnss.domain.GnssSolution;
 public interface IGnssStorageService {
 
     /**
-     * 保存解算结果
+     * 保存解算结果（指定站点）
+     * @param stationId 站点ID
      * @param solution 解算后的实体对象
      */
-    void saveSolution(GnssSolution solution);
+    void saveSolution(String stationId, GnssSolution solution);
 
 }

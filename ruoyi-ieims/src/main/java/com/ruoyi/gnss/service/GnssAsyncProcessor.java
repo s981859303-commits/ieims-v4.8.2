@@ -18,21 +18,9 @@ import java.util.List;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * GNSS 数据异步处理服务（集成队列监控）
- *
- * <p>
- * 功能说明：
- * 1. 解耦 MQTT 接收线程与数据库 I/O
- * 2. 使用生产者-消费者模式
- * 3. 批量提交数据，提高写入效率
- * 4. 集成队列监控告警
- * </p>
- *
- * @author GNSS Team
- * @date 2026-03-26
+ * GNSS 数据异步处理服务
  */
 @Service
 public class GnssAsyncProcessor {
@@ -58,6 +46,9 @@ public class GnssAsyncProcessor {
 
     @Value("${gnss.async.backpressureWaitMs:10}")
     private long backpressureWaitMs;
+
+    @Value("${gnss.async.offerTimeoutMs:50}")
+    private long offerTimeoutMs;
 
     @Value("${gnss.async.shutdownTimeoutSec:30}")
     private int shutdownTimeoutSec;
@@ -114,13 +105,11 @@ public class GnssAsyncProcessor {
 
     @PostConstruct
     public void init() {
-        // 初始化队列
         nmeaQueue = new LinkedBlockingQueue<>(queueSize);
         rtcmQueue = new LinkedBlockingQueue<>(queueSize);
         satObsQueue = new LinkedBlockingQueue<>(queueSize);
         gnssSolutionQueue = new LinkedBlockingQueue<>(queueSize);
 
-        // 初始化统计计数器
         counters.put("nmea.submitted", new AtomicLong(0));
         counters.put("nmea.processed", new AtomicLong(0));
         counters.put("nmea.dropped", new AtomicLong(0));
@@ -129,19 +118,19 @@ public class GnssAsyncProcessor {
         counters.put("rtcm.dropped", new AtomicLong(0));
         counters.put("satobs.submitted", new AtomicLong(0));
         counters.put("satobs.processed", new AtomicLong(0));
+        counters.put("satobs.dropped", new AtomicLong(0));
+        counters.put("solution.submitted", new AtomicLong(0));
+        counters.put("solution.processed", new AtomicLong(0));
+        counters.put("solution.dropped", new AtomicLong(0));
 
-        // 注册队列监控
         if (queueMonitorService != null) {
             queueMonitorService.registerQueue("NMEA", nmeaQueue, queueSize);
             queueMonitorService.registerQueue("RTCM", rtcmQueue, queueSize);
             queueMonitorService.registerQueue("SatObs", satObsQueue, queueSize);
             queueMonitorService.registerQueue("GnssSolution", gnssSolutionQueue, queueSize);
-
-            // 添加告警监听器
             queueMonitorService.addAlertListener(this::handleQueueAlert);
         }
 
-        // 初始化消费者线程池
         consumerPool = Executors.newFixedThreadPool(consumerThreads, r -> {
             Thread t = new Thread(r, "GNSS-Async-Consumer");
             t.setDaemon(false);
@@ -149,11 +138,8 @@ public class GnssAsyncProcessor {
         });
 
         running.set(true);
-
-        // 启动消费者
         startConsumers();
 
-        // 启动定时刷新任务
         flushScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "GNSS-Flush-Scheduler");
             t.setDaemon(false);
@@ -161,180 +147,160 @@ public class GnssAsyncProcessor {
         });
         flushScheduler.scheduleAtFixedRate(this::flushAll, flushIntervalMs, flushIntervalMs, TimeUnit.MILLISECONDS);
 
-        logger.info("GNSS 异步处理服务初始化完成，队列大小: {}, 批量大小: {}, 消费者线程: {}, 背压阈值: {}%, 队列监控: {}",
-                queueSize, batchSize, consumerThreads, (int)(backpressureThreshold * 100),
-                queueMonitorService != null ? "已启用" : "未启用");
+        logger.info("GNSS 异步处理服务初始化完成，队列大小: {}, 消费者线程: {}, 背压阈值: {}%",
+                queueSize, consumerThreads, (int)(backpressureThreshold * 100));
     }
 
-    /**
-     * 处理队列告警事件
-     */
     private void handleQueueAlert(QueueAlertEvent event) {
-        // 可以在这里添加额外的告警处理逻辑
-        // 例如：发送邮件、短信、调用外部API等
         logger.info("收到队列告警: {}", event.getMessage());
     }
 
     // ==================== 生产者方法 ====================
 
-    /**
-     * 提交 NMEA 数据（带背压控制）
-     */
     public boolean submitNmea(String nmea) {
-        return submitNmea(null, nmea);
+        return submitNmea(StationContext.getCurrentStationId(), nmea);
     }
 
-    /**
-     * 提交 NMEA 数据（指定站点，带背压控制）
-     */
     public boolean submitNmea(String stationId, String nmea) {
-        if (nmea == null || nmea.isEmpty() || !running.get()) {
-            return false;
-        }
+        if (nmea == null || nmea.isEmpty() || !running.get()) return false;
 
-        // 背压控制
-        if (checkBackpressure(nmeaQueue)) {
-            counters.get("nmea.dropped").incrementAndGet();
-            if (queueMonitorService != null) {
-                queueMonitorService.recordDrop("NMEA");
-            }
-            return false;
-        }
+        String safeStationId = (stationId != null) ? stationId : StationContext.getDefaultStationId();
 
-        NmeaTask task = new NmeaTask(System.currentTimeMillis(), stationId, nmea);
-        boolean success = nmeaQueue.offer(task);
+        // 1. 触发背压限流（生产端减速，但不丢弃）
+        applyBackpressure(nmeaQueue);
+
+        NmeaTask task = new NmeaTask(System.currentTimeMillis(), safeStationId, nmea);
+
+        // 2. 弹性入队：如果满了，等待 offerTimeoutMs 毫秒
+        boolean success = false;
+        try {
+            success = nmeaQueue.offer(task, offerTimeoutMs, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
 
         if (success) {
             counters.get("nmea.submitted").incrementAndGet();
-            if (queueMonitorService != null) {
-                queueMonitorService.recordProduce("NMEA");
-            }
+            if (queueMonitorService != null) queueMonitorService.recordProduce("NMEA");
         } else {
+            // 只有 100% 满且等待超时后，才真正丢弃
             counters.get("nmea.dropped").incrementAndGet();
-            if (queueMonitorService != null) {
-                queueMonitorService.recordDrop("NMEA");
-            }
-            if (counters.get("nmea.dropped").get() % 100 == 1) {
-                logger.warn("NMEA 队列已满，丢弃数据 [累计丢弃: {}]", counters.get("nmea.dropped").get());
-            }
+            if (queueMonitorService != null) queueMonitorService.recordDrop("NMEA");
         }
-
         return success;
     }
 
-    /**
-     * 提交 RTCM 数据（带背压控制）
-     */
     public boolean submitRtcm(byte[] rtcmData) {
-        return submitRtcm(null, rtcmData);
+        return submitRtcm(StationContext.getCurrentStationId(), rtcmData);
     }
 
-    /**
-     * 提交 RTCM 数据（指定站点，带背压控制）
-     */
     public boolean submitRtcm(String stationId, byte[] rtcmData) {
-        if (rtcmData == null || rtcmData.length == 0 || !running.get()) {
-            return false;
-        }
+        if (rtcmData == null || rtcmData.length == 0 || !running.get()) return false;
 
-        // 背压控制
-        if (checkBackpressure(rtcmQueue)) {
-            counters.get("rtcm.dropped").incrementAndGet();
-            if (queueMonitorService != null) {
-                queueMonitorService.recordDrop("RTCM");
-            }
-            return false;
-        }
+        String safeStationId = (stationId != null) ? stationId : StationContext.getDefaultStationId();
 
-        RtcmTask task = new RtcmTask(System.currentTimeMillis(), stationId, rtcmData);
-        boolean success = rtcmQueue.offer(task);
+        applyBackpressure(rtcmQueue);
+
+        RtcmTask task = new RtcmTask(System.currentTimeMillis(), safeStationId, rtcmData);
+
+        boolean success = false;
+        try {
+            success = rtcmQueue.offer(task, offerTimeoutMs, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
 
         if (success) {
             counters.get("rtcm.submitted").incrementAndGet();
-            if (queueMonitorService != null) {
-                queueMonitorService.recordProduce("RTCM");
-            }
+            if (queueMonitorService != null) queueMonitorService.recordProduce("RTCM");
         } else {
             counters.get("rtcm.dropped").incrementAndGet();
-            if (queueMonitorService != null) {
-                queueMonitorService.recordDrop("RTCM");
-            }
+            if (queueMonitorService != null) queueMonitorService.recordDrop("RTCM");
         }
-
         return success;
     }
 
-    /**
-     * 提交卫星观测数据
-     */
     public boolean submitSatObservations(List<SatObservation> observations) {
-        return submitSatObservations(null, observations);
+        return submitSatObservations(StationContext.getCurrentStationId(), observations);
     }
 
-    /**
-     * 提交卫星观测数据（指定站点）
-     */
     public boolean submitSatObservations(String stationId, List<SatObservation> observations) {
-        if (observations == null || observations.isEmpty() || !running.get()) {
-            return false;
-        }
+        if (observations == null || observations.isEmpty() || !running.get()) return false;
 
-        SatObsTask task = new SatObsTask(System.currentTimeMillis(), stationId, observations);
-        boolean success = satObsQueue.offer(task);
+        String safeStationId = (stationId != null) ? stationId : StationContext.getDefaultStationId();
+
+        applyBackpressure(satObsQueue);
+
+        SatObsTask task = new SatObsTask(System.currentTimeMillis(), safeStationId, observations);
+
+        boolean success = false;
+        try {
+            success = satObsQueue.offer(task, offerTimeoutMs, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
 
         if (success) {
             counters.get("satobs.submitted").addAndGet(observations.size());
-            if (queueMonitorService != null) {
-                queueMonitorService.recordProduce("SatObs");
-            }
+            if (queueMonitorService != null) queueMonitorService.recordProduce("SatObs");
+        } else {
+            counters.get("satobs.dropped").addAndGet(observations.size());
+            if (queueMonitorService != null) queueMonitorService.recordDrop("SatObs");
         }
-
         return success;
     }
 
-    /**
-     * 提交 GNSS 解算结果
-     */
     public boolean submitGnssSolution(GnssSolution solution) {
-        if (solution == null || !running.get()) {
-            return false;
+        return submitGnssSolution(StationContext.getCurrentStationId(), solution);
+    }
+
+    public boolean submitGnssSolution(String stationId, GnssSolution solution) {
+        if (solution == null || !running.get()) return false;
+
+        String safeStationId = (stationId != null) ? stationId : StationContext.getDefaultStationId();
+
+        applyBackpressure(gnssSolutionQueue);
+
+        GnssSolutionTask task = new GnssSolutionTask(System.currentTimeMillis(), safeStationId, solution);
+
+        boolean success = false;
+        try {
+            success = gnssSolutionQueue.offer(task, offerTimeoutMs, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
 
-        GnssSolutionTask task = new GnssSolutionTask(System.currentTimeMillis(), null, solution);
-        boolean success = gnssSolutionQueue.offer(task);
-
-        if (success && queueMonitorService != null) {
-            queueMonitorService.recordProduce("GnssSolution");
+        if (success) {
+            counters.get("solution.submitted").incrementAndGet();
+            if (queueMonitorService != null) queueMonitorService.recordProduce("GnssSolution");
+        } else {
+            counters.get("solution.dropped").incrementAndGet();
+            if (queueMonitorService != null) queueMonitorService.recordDrop("GnssSolution");
         }
-
         return success;
     }
 
     /**
-     * 检查背压状态
+     * 【修复】真正的背压逻辑：只减速，不干预丢弃逻辑
      */
-    private boolean checkBackpressure(BlockingQueue<?> queue) {
+    private void applyBackpressure(BlockingQueue<?> queue) {
         int queueSize = queue.size();
         int capacity = queue.remainingCapacity() + queueSize;
 
         if (capacity > 0 && queueSize >= (int)(capacity * backpressureThreshold)) {
             backpressureActive.set(true);
             backpressureCount.incrementAndGet();
-
-            // 尝试短暂等待
             if (backpressureWaitMs > 0) {
                 try {
+                    // 强行让 MQTT 接收线程睡一会儿，降低洪水灌入速度
                     Thread.sleep(backpressureWaitMs);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
             }
-
-            return true;
+        } else {
+            backpressureActive.set(false);
         }
-
-        backpressureActive.set(false);
-        return false;
     }
 
     // ==================== 消费者方法 ====================
@@ -346,23 +312,16 @@ public class GnssAsyncProcessor {
         new Thread(this::consumeGnssSolution, "Consumer-GnssSolution").start();
     }
 
-    /**
-     * NMEA 消费者（修复批量处理逻辑）
-     */
     private void consumeNmea() {
         List<NmeaTask> batch = new ArrayList<>(batchSize);
         long lastProcessTime = System.currentTimeMillis();
 
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
-                // 阻塞等待第一个元素
                 NmeaTask task = nmeaQueue.poll(100, TimeUnit.MILLISECONDS);
-
                 if (task == null) {
-                    // 队列为空，检查是否需要处理已累积的批次
                     if (!batch.isEmpty()) {
                         long now = System.currentTimeMillis();
-                        // 超过刷新间隔，处理当前批次
                         if (now - lastProcessTime >= flushIntervalMs) {
                             processNmeaBatch(batch);
                             batch.clear();
@@ -371,166 +330,121 @@ public class GnssAsyncProcessor {
                     }
                     continue;
                 }
-
                 batch.add(task);
+                nmeaQueue.drainTo(batch, batchSize - 1);
 
-                // 使用 drainTo 批量获取更多元素
-                int drained = nmeaQueue.drainTo(batch, batchSize - 1);
-
-                // 达到批量大小或超时时处理
                 long now = System.currentTimeMillis();
-                boolean shouldProcess = batch.size() >= batchSize ||
-                        (now - lastProcessTime >= flushIntervalMs && !batch.isEmpty());
-
-                if (shouldProcess) {
+                if (batch.size() >= batchSize || (now - lastProcessTime >= flushIntervalMs)) {
                     processNmeaBatch(batch);
                     batch.clear();
                     lastProcessTime = now;
                 }
-
             } catch (InterruptedException e) {
-                logger.info("NMEA 消费者被中断");
                 Thread.currentThread().interrupt();
-                // 处理剩余数据
-                if (!batch.isEmpty()) {
-                    processNmeaBatch(batch);
-                }
+                if (!batch.isEmpty()) processNmeaBatch(batch);
                 break;
-            } catch (Exception e) {
-                logger.error("NMEA 消费异常: {}", e.getMessage());
+            } catch (Throwable t) {
+                logger.error("NMEA 消费异常: {}", t.getMessage());
             }
         }
     }
 
-    /**
-     * 批量处理 NMEA 数据
-     */
     private void processNmeaBatch(List<NmeaTask> batch) {
-        if (batch.isEmpty() || nmeaStorageService == null) {
-            return;
-        }
-
+        if (batch.isEmpty() || nmeaStorageService == null) return;
         try {
+            java.util.Map<String, List<NmeaRecord>> byStation = new java.util.HashMap<>();
+
             for (NmeaTask task : batch) {
                 NmeaRecord record = new NmeaRecord(new Date(task.timestamp), task.nmea);
+                String sid = (task.stationId != null) ? task.stationId : StationContext.getDefaultStationId();
+                byStation.computeIfAbsent(sid, k -> new java.util.ArrayList<>()).add(record);
+            }
+            // 批量提交每个站点的聚合数据
+            for (java.util.Map.Entry<String, List<NmeaRecord>> entry : byStation.entrySet()) {
+                int saved = nmeaStorageService.saveNmeaBatch(entry.getKey(), entry.getValue());
 
-                boolean success;
-                if (task.stationId != null) {
-                    success = nmeaStorageService.saveNmeaData(task.stationId, record);
-                } else {
-                    success = nmeaStorageService.saveNmeaData(record);
-                }
-
-                if (success) {
-                    counters.get("nmea.processed").incrementAndGet();
+                if (saved > 0) {
+                    counters.get("nmea.processed").addAndGet(saved);
+                    // 批量更新监控大屏计数
                     if (queueMonitorService != null) {
-                        queueMonitorService.recordConsume("NMEA");
+                        for(int i = 0; i < saved; i++) {
+                            queueMonitorService.recordConsume("NMEA");
+                        }
                     }
                 }
             }
-
         } catch (Exception e) {
             logger.error("批量存储 NMEA 数据失败: {}", e.getMessage());
         }
     }
 
-    /**
-     * RTCM 消费者
-     */
     private void consumeRtcm() {
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
                 RtcmTask task = rtcmQueue.poll(100, TimeUnit.MILLISECONDS);
-                if (task == null) {
-                    continue;
-                }
+                if (task == null) continue;
 
                 if (rtcmStorageService != null) {
-                    rtcmStorageService.saveRtcmRawData(task.data);
+                    String sid = (task.stationId != null) ? task.stationId : StationContext.getDefaultStationId();
+                    rtcmStorageService.saveRtcmRawData(sid, task.data);
                 }
                 counters.get("rtcm.processed").incrementAndGet();
-
-                if (queueMonitorService != null) {
-                    queueMonitorService.recordConsume("RTCM");
-                }
+                if (queueMonitorService != null) queueMonitorService.recordConsume("RTCM");
 
             } catch (InterruptedException e) {
-                logger.info("RTCM 消费者被中断");
                 Thread.currentThread().interrupt();
                 break;
-            } catch (Exception e) {
-                logger.error("RTCM 消费异常: {}", e.getMessage());
+            } catch (Throwable t) {
+                logger.error("RTCM 消费异常: {}", t.getMessage());
             }
         }
     }
 
-    /**
-     * 卫星观测数据消费者
-     */
     private void consumeSatObs() {
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
                 SatObsTask task = satObsQueue.poll(100, TimeUnit.MILLISECONDS);
-                if (task == null) {
-                    continue;
-                }
+                if (task == null) continue;
 
                 if (satObservationStorageService != null) {
-                    if (task.stationId != null) {
-                        satObservationStorageService.saveSatObservationBatch(task.stationId, task.observations);
-                    } else {
-                        satObservationStorageService.saveSatObservationBatch("default", task.observations);
-                    }
+                    String sid = (task.stationId != null) ? task.stationId : StationContext.getDefaultStationId();
+                    satObservationStorageService.saveSatObservationBatch(sid, task.observations);
                 }
                 counters.get("satobs.processed").addAndGet(task.observations.size());
-
-                if (queueMonitorService != null) {
-                    queueMonitorService.recordConsume("SatObs");
-                }
+                if (queueMonitorService != null) queueMonitorService.recordConsume("SatObs");
 
             } catch (InterruptedException e) {
-                logger.info("卫星观测数据消费者被中断");
                 Thread.currentThread().interrupt();
                 break;
-            } catch (Exception e) {
-                logger.error("卫星观测数据消费异常: {}", e.getMessage());
+            } catch (Throwable t) {
+                logger.error("卫星观测数据消费异常: {}", t.getMessage());
             }
         }
     }
 
-    /**
-     * GNSS 解算结果消费者
-     */
     private void consumeGnssSolution() {
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
                 GnssSolutionTask task = gnssSolutionQueue.poll(100, TimeUnit.MILLISECONDS);
-                if (task == null) {
-                    continue;
-                }
+                if (task == null) continue;
 
                 if (gnssStorageService != null) {
-                    gnssStorageService.saveSolution(task.solution);
+                    String sid = (task.stationId != null) ? task.stationId : StationContext.getDefaultStationId();
+                    gnssStorageService.saveSolution(sid, task.solution);
                 }
-
-                if (queueMonitorService != null) {
-                    queueMonitorService.recordConsume("GnssSolution");
-                }
+                counters.get("solution.processed").incrementAndGet();
+                if (queueMonitorService != null) queueMonitorService.recordConsume("GnssSolution");
 
             } catch (InterruptedException e) {
-                logger.info("GNSS 解算结果消费者被中断");
                 Thread.currentThread().interrupt();
                 break;
-            } catch (Exception e) {
-                logger.error("GNSS 解算结果消费异常: {}", e.getMessage());
+            } catch (Throwable t) {
+                logger.error("GNSS 解算结果消费异常: {}", t.getMessage());
             }
         }
     }
 
-    // ==================== 刷新方法 ====================
-
     private void flushAll() {
-        // 触发融合服务入库
         if (fusionService != null) {
             fusionService.flushPending();
         }
@@ -541,130 +455,35 @@ public class GnssAsyncProcessor {
     public String getStatistics() {
         StringBuilder sb = new StringBuilder();
         sb.append(String.format(
-                "NMEA[submitted=%d, processed=%d, dropped=%d, pending=%d], " +
-                        "RTCM[submitted=%d, processed=%d, dropped=%d, pending=%d], " +
-                        "SatObs[submitted=%d, processed=%d, pending=%d], " +
-                        "Backpressure[count=%d, active=%s]",
-                counters.get("nmea.submitted").get(),
-                counters.get("nmea.processed").get(),
-                counters.get("nmea.dropped").get(),
-                nmeaQueue.size(),
-                counters.get("rtcm.submitted").get(),
-                counters.get("rtcm.processed").get(),
-                counters.get("rtcm.dropped").get(),
-                rtcmQueue.size(),
-                counters.get("satobs.submitted").get(),
-                counters.get("satobs.processed").get(),
-                satObsQueue.size(),
-                backpressureCount.get(),
-                backpressureActive.get()
+                "NMEA[sub=%d, pro=%d, drop=%d, pend=%d], " +
+                        "RTCM[sub=%d, pro=%d, drop=%d, pend=%d], " +
+                        "SatObs[sub=%d, pro=%d, drop=%d, pend=%d], " +
+                        "Solution[sub=%d, pro=%d, drop=%d, pend=%d], " +
+                        "Backpressure[cnt=%d, act=%s]",
+                counters.get("nmea.submitted").get(), counters.get("nmea.processed").get(), counters.get("nmea.dropped").get(), nmeaQueue.size(),
+                counters.get("rtcm.submitted").get(), counters.get("rtcm.processed").get(), counters.get("rtcm.dropped").get(), rtcmQueue.size(),
+                counters.get("satobs.submitted").get(), counters.get("satobs.processed").get(), counters.get("satobs.dropped").get(), satObsQueue.size(),
+                counters.get("solution.submitted").get(), counters.get("solution.processed").get(), counters.get("solution.dropped").get(), gnssSolutionQueue.size(),
+                backpressureCount.get(), backpressureActive.get()
         ));
-
-        // 添加队列监控状态
-        if (queueMonitorService != null) {
-            sb.append(", ").append(queueMonitorService.getStatusSummary());
-        }
-
+        if (queueMonitorService != null) sb.append(", ").append(queueMonitorService.getStatusSummary());
         return sb.toString();
     }
-
-    public int getNmeaQueueSize() {
-        return nmeaQueue.size();
-    }
-
-    public int getRtcmQueueSize() {
-        return rtcmQueue.size();
-    }
-
-    public int getSatObsQueueSize() {
-        return satObsQueue.size();
-    }
-
-    public boolean isBackpressureActive() {
-        return backpressureActive.get();
-    }
-
-    public double getQueueUsageRatio() {
-        int totalCapacity = queueSize;
-        int currentSize = nmeaQueue.size();
-        return (double) currentSize / totalCapacity;
-    }
-
-    // ==================== 销毁方法 ====================
 
     @PreDestroy
     public void destroy() {
         logger.info("正在关闭 GNSS 异步处理服务...");
-
-        // 1. 停止接收新任务
         running.set(false);
-
-        // 2. 停止定时刷新任务
         flushScheduler.shutdown();
 
-        // 3. 等待队列清空（带超时）
-        waitForQueueDrain();
-
-        // 4. 关闭消费者线程池
-        consumerPool.shutdown();
-
-        try {
-            // 5. 等待消费者线程终止
-            if (!consumerPool.awaitTermination(shutdownTimeoutSec, TimeUnit.SECONDS)) {
-                logger.warn("消费者线程池未在 {} 秒内终止，强制关闭", shutdownTimeoutSec);
-                List<Runnable> unfinishedTasks = consumerPool.shutdownNow();
-                logger.warn("强制关闭后仍有 {} 个任务未执行", unfinishedTasks.size());
-            }
-
-            // 6. 等待 flushScheduler 终止
-            if (!flushScheduler.awaitTermination(5, TimeUnit.SECONDS)) {
-                flushScheduler.shutdownNow();
-            }
-
-        } catch (InterruptedException e) {
-            logger.warn("关闭过程被中断");
-            Thread.currentThread().interrupt();
-            consumerPool.shutdownNow();
-            flushScheduler.shutdownNow();
-        }
-
-        // 7. 输出最终统计
-        logger.info("GNSS 异步处理服务已关闭，最终统计: {}", getStatistics());
-    }
-
-    /**
-     * 等待队列清空
-     */
-    private void waitForQueueDrain() {
         long startTime = System.currentTimeMillis();
-        long timeoutMs = queueDrainTimeoutSec * 1000L;
-
-        while (System.currentTimeMillis() - startTime < timeoutMs) {
-            int nmeaPending = nmeaQueue.size();
-            int rtcmPending = rtcmQueue.size();
-            int satObsPending = satObsQueue.size();
-            int solutionPending = gnssSolutionQueue.size();
-
-            if (nmeaPending == 0 && rtcmPending == 0 && satObsPending == 0 && solutionPending == 0) {
-                logger.info("所有队列已清空");
-                return;
-            }
-
-            logger.debug("等待队列清空: NMEA={}, RTCM={}, SatObs={}, Solution={}",
-                    nmeaPending, rtcmPending, satObsPending, solutionPending);
-
-            try {
-                Thread.sleep(100);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                logger.warn("等待队列清空被中断，剩余数据可能丢失");
-                break;
-            }
+        while (System.currentTimeMillis() - startTime < queueDrainTimeoutSec * 1000L) {
+            if (nmeaQueue.isEmpty() && rtcmQueue.isEmpty() && satObsQueue.isEmpty() && gnssSolutionQueue.isEmpty()) break;
+            try { Thread.sleep(100); } catch (InterruptedException e) { break; }
         }
 
-        // 超时后记录剩余数据
-        logger.warn("队列清空超时，剩余数据: NMEA={}, RTCM={}, SatObs={}, Solution={}",
-                nmeaQueue.size(), rtcmQueue.size(), satObsQueue.size(), gnssSolutionQueue.size());
+        consumerPool.shutdown();
+        logger.info("GNSS 异步处理服务已关闭，最终统计: {}", getStatistics());
     }
 
     // ==================== 内部任务类 ====================

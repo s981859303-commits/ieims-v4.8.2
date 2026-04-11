@@ -11,6 +11,7 @@ import org.springframework.stereotype.Service;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
+import java.util.Locale;
 
 /**
  * TDengine GNSS 存储服务实现
@@ -94,21 +95,18 @@ public class TDengineGnssStorageServiceImpl implements IGnssStorageService {
     }
 
     @Override
-    public void saveSolution(GnssSolution solution) {
+    public void saveSolution(String targetStationId, GnssSolution solution) {
         if (!initialized || solution == null) {
             return;
         }
 
         try {
-            String tableName = tablePrefix + sanitizeTableName(stationId);
+            String tableName = tablePrefix + sanitizeTableName(targetStationId);
             long timestamp = solution.getTime() != null ? solution.getTime().getTime() : System.currentTimeMillis();
 
-            String insertSql = String.format(
-                    "INSERT INTO %s (ts, lat, lon, alt, status, sat_count, hdop) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    tableName
-            );
-
-            tdengineUtil.executeUpdate(insertSql,
+            String insertSql = String.format(Locale.US,
+                    "INSERT INTO %s USING %s TAGS ('%s') VALUES (%d, %f, %f, %f, %d, %d, %f)",
+                    tableName, STABLE_NAME, targetStationId,
                     timestamp,
                     solution.getLatitude(),
                     solution.getLongitude(),
@@ -118,7 +116,9 @@ public class TDengineGnssStorageServiceImpl implements IGnssStorageService {
                     solution.getHdop()
             );
 
-            logger.debug("GNSS 解算结果已存储");
+            tdengineUtil.executeUpdate(insertSql); // 变成单参数调用
+
+            logger.debug("GNSS 解算结果已存储, 站点: {}", targetStationId);
 
         } catch (Exception e) {
             logger.error("存储 GNSS 解算结果失败: {}", e.getMessage(), e);

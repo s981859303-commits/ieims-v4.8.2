@@ -56,7 +56,9 @@ gnss:
     # MQTT Broker 地址
     broker: tcp://broker.emqx.io:1883
     # 订阅主题（接收 GNSS 数据）
-    topic: /USER-G780s/update
+    # 使用 + 通配符，代表匹配这一层级的任何字符串
+    # 配置多站点设置：topic: ieims/gnss/data/+        测试站点guet_test1
+    topic: /ieims/gnss/data/+
     # 客户端 ID 前缀
     client-id-prefix: RuoYi_Client_
     # 用户名（可选）
@@ -140,6 +142,15 @@ gnss:
     intervalMs: 1000
     epochTimeoutMs: 2000
     cacheMaxSize: 10000
+
+  # ==================== GSV数据配置 ====================
+  gsv:
+    groupExpireMs: 15000       # 网络差，把GSV组包等待时间拉长到15秒
+    cleanupIntervalMs: 10000   # 降低清理频率，节省CPU
+    parser:
+      maxBufferSize: 131072      # 增大缓冲区到 128KB
+    rtklib:
+      maxObs: 100                # 支持更多卫星
 
   # Spring配置
 spring:

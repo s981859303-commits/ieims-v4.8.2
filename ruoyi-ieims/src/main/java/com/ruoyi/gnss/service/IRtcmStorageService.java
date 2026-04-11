@@ -21,12 +21,13 @@ public interface IRtcmStorageService {
     boolean isInitialized();
 
     /**
-     * 保存 RTCM 原始数据
+     * 保存 RTCM 原始数据（指定站点）
      *
+     * @param stationId 站点ID
      * @param rtcmData RTCM 二进制数据
      * @return true 表示保存成功
      */
-    boolean saveRtcmRawData(byte[] rtcmData);
+    boolean saveRtcmRawData(String stationId, byte[] rtcmData);
 
     /**
      * 获取存储统计信息

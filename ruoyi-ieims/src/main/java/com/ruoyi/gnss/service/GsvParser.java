@@ -11,8 +11,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.beans.factory.annotation.Value;
 /**
- * GSV 语句解析器（增强版）
+ * GSV 语句解析器
  *
  * 功能：
  * 1. 解析 GPGSV / GBGSV / GLGSV / GAGSV 语句
@@ -35,13 +36,15 @@ import org.springframework.scheduling.annotation.Scheduled;
  * 3. 新增数据有效性校验
  * 4. 修复多线程安全问题
  *
- * @author GNSS Team
- * @version 2.0 - 2026-04-02 添加日期关联支持
  */
 @Component
 public class GsvParser {
 
-    @Scheduled(fixedRate = 5000) // 每5秒清理一次僵尸包
+    @Value("${gnss.gsv.groupExpireMs:5000}")
+    private long gsvGroupExpireMs;
+
+    // 使用 fixedRateString 支持从配置文件读取定时任务频率
+    @Scheduled(fixedRateString = "${gnss.gsv.cleanupIntervalMs:5000}")
     public void scheduledCleanup() {
         cleanupExpiredCache(); // 清理过期缓存
     }
@@ -258,7 +261,7 @@ public class GsvParser {
     public void cleanupExpiredCache() {
         long now = System.currentTimeMillis();
         gsvGroupCache.entrySet().removeIf(entry ->
-                (now - entry.getValue().lastUpdateTime) > GSV_GROUP_EXPIRE_MS);
+                (now - entry.getValue().lastUpdateTime) > this.gsvGroupExpireMs);
     }
 
     // ==================== 私有方法 ====================

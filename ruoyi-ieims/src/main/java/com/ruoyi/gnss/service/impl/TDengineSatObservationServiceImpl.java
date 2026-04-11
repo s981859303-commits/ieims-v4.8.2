@@ -50,7 +50,6 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
     }
 
     private void initTables() {
-        // 防止数据库不存在导致建表崩溃
         try {
             tdengineUtil.executeDDL("CREATE DATABASE IF NOT EXISTS " + database);
         } catch (Exception e) {
@@ -116,32 +115,48 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
         try {
             StringBuilder sqlBuilder = new StringBuilder("INSERT INTO ");
 
+// 1. 按目标表名进行分组
+            java.util.Map<String, java.util.List<SatObservation>> tableGroup = new java.util.LinkedHashMap<>();
             for (SatObservation obs : obsList) {
-                // 表名通过 stationId 和 satNo 拼接
                 String tableName = "satobs_" + sanitizeTableName(obs.getStationId()) + "_" + sanitizeTableName(obs.getSatNo());
+                tableGroup.computeIfAbsent(tableName, k -> new java.util.ArrayList<>()).add(obs);
+            }
 
-                // 🔥 核心修复：将字段映射到 SatObservation 中真实存在的 Getter 方法
+            // 2. 按组拼接 SQL
+            for (java.util.Map.Entry<String, java.util.List<SatObservation>> entry : tableGroup.entrySet()) {
+                String tableName = entry.getKey();
+                java.util.List<SatObservation> list = entry.getValue();
+                SatObservation firstObs = list.get(0);
+
+                // 拼接表名和 TAGS (每张表只出现一次)
                 sqlBuilder.append(String.format(Locale.US,
-                        "%s USING %s TAGS ('%s', '%s') VALUES (%d, '%s', %d, '%s', '%s', '%s', %f, %f, %f, %f, %f, %f, %f, %f, %f, %f, %f) ",
-                        tableName, STABLE_NAME, obs.getStationId(), obs.getSatNo(),
-                        obs.getFullTimestamp() != null ? obs.getFullTimestamp() : System.currentTimeMillis(), // 主键 ts
-                        obs.getObservationTimeStr() != null ? obs.getObservationTimeStr() : "", // obs_time (替换了错误的 getObsTime)
-                        obs.getTimestamp() != null ? obs.getTimestamp() : 0L, // sys_time (替换了错误的 getSysTime)
-                        obs.getC1() != null ? obs.getC1() : "",
-                        obs.getC2() != null ? obs.getC2() : "",
-                        "", // 实体类中没有 C3，默认填空字符串
-                        obs.getPseudorangeP1() != null ? obs.getPseudorangeP1() : 0.0, // P1 (替换了错误的 getP1)
-                        obs.getPseudorangeP2() != null ? obs.getPseudorangeP2() : 0.0, // P2 (替换了错误的 getP2)
-                        0.0, // P3，实体中无此字段
-                        obs.getPhaseL1() != null ? obs.getPhaseL1() : 0.0, // L1 (替换了错误的 getL1)
-                        0.0, // L2，实体中为 phaseP2（这里先填0，下面填到对应位置）
-                        0.0, // L3
-                        obs.getSnr() != null ? obs.getSnr() : 0.0, // S1 (使用 snr 替代)
-                        0.0, // S2
-                        0.0, // S3
-                        obs.getElevation() != null ? obs.getElevation() : 0.0,
-                        obs.getAzimuth() != null ? obs.getAzimuth() : 0.0
+                        "%s USING %s TAGS ('%s', '%s') VALUES ",
+                        tableName, STABLE_NAME, firstObs.getStationId(), firstObs.getSatNo()
                 ));
+
+                // 拼接该表下的所有 VALUES
+                for (SatObservation obs : list) {
+                    sqlBuilder.append(String.format(Locale.US,
+                            "(%d, '%s', %d, '%s', '%s', '%s', %f, %f, %f, %f, %f, %f, %f, %f, %f, %f, %f) ",
+                            obs.getFullTimestamp() != null ? obs.getFullTimestamp() : System.currentTimeMillis(), // 主键 ts
+                            obs.getFullObservationTimeStr() != null ? obs.getFullObservationTimeStr() : "", // obs_time
+                            obs.getTimestamp() != null ? obs.getTimestamp() : 0L, // sys_time
+                            obs.getC1() != null ? obs.getC1() : "",
+                            obs.getC2() != null ? obs.getC2() : "",
+                            "", // c3
+                            obs.getPseudorangeP1() != null ? obs.getPseudorangeP1() : 0.0, // p1
+                            obs.getPseudorangeP2() != null ? obs.getPseudorangeP2() : 0.0, // p2
+                            0.0, // p3
+                            obs.getPhaseL1() != null ? obs.getPhaseL1() : 0.0, // l1
+                            0.0, // l2
+                            0.0, // l3
+                            obs.getSnr() != null ? obs.getSnr() : 0.0, // s1
+                            0.0, // s2
+                            0.0, // s3
+                            obs.getElevation() != null ? obs.getElevation() : 0.0,
+                            obs.getAzimuth() != null ? obs.getAzimuth() : 0.0
+                    ));
+                }
             }
 
             tdengineUtil.executeUpdate(sqlBuilder.toString());
@@ -154,9 +169,6 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
         return name == null ? "unknown" : name.replaceAll("[^a-zA-Z0-9_]", "_");
     }
 
-    // =========================================================================
-    // 🔥 占位实现：满足 ISatObservationStorageService 接口的其他规范要求
-    // =========================================================================
 
     @Override
     public List<SatObservation> queryByTimeRange(String stationId, long startTime, long endTime) {

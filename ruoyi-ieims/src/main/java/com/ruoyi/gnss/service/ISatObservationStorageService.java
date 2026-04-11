@@ -16,7 +16,6 @@ import java.util.List;
  *  * 5. 删除指定时间范围的数据
  *  * 6. 获取统计信息
  *
- * @version 2.1 - 2026-04-02 添加重载方法
  */
 public interface ISatObservationStorageService {
 

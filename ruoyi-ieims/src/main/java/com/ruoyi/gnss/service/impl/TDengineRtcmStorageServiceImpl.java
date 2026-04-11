@@ -6,13 +6,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
-import java.util.Base64;
-import java.util.List;
 import java.util.Locale;
 
 /**
@@ -90,15 +87,16 @@ public class TDengineRtcmStorageServiceImpl implements IRtcmStorageService {
     }
 
     @Override
-    public boolean saveRtcmRawData(byte[] rtcmData) {
+    public boolean saveRtcmRawData(String targetStationId, byte[] rtcmData) {
         if (!initialized || rtcmData == null || rtcmData.length == 0) return false;
         try {
-            String tableName = "rtcm_" + sanitizeTableName(stationId);
+            String tableName = "rtcm_" + sanitizeTableName(targetStationId);
             long timestamp = System.currentTimeMillis();
-            String base64Data = Base64.getEncoder().encodeToString(rtcmData);
-            String insertSql = String.format(
-                    "INSERT INTO %s (ts, data_len, data_base64) VALUES (%d, %d, '%s')",
-                    tableName, timestamp, rtcmData.length, base64Data
+            String base64Data = java.util.Base64.getEncoder().encodeToString(rtcmData);
+
+            String insertSql = String.format(Locale.US,
+                    "INSERT INTO %s USING %s TAGS ('%s') VALUES (%d, %d, '%s')",
+                    tableName, STABLE_RTCM_RAW, targetStationId, timestamp, rtcmData.length, base64Data
             );
             tdengineUtil.executeUpdate(insertSql);
             return true;

@@ -52,7 +52,12 @@ public class MixedLogSplitter {
     // ==================== 常量定义 ====================
 
     private static final int DEFAULT_BUFFER_SIZE = 4096;
-    private static final int MAX_BUFFER_SIZE = 65536;
+
+    @Value("${gnss.parser.maxBufferSize:65536}")
+    private int maxBufferSize;
+
+    @Value("${gnss.rtklib.maxObs:64}")
+    private int maxObs;
 
     private static final byte NMEA_START = '$';
     private static final byte RTCM3_PREAMBLE = (byte) 0xD3;
@@ -175,6 +180,9 @@ public class MixedLogSplitter {
         state.lock.lock();
         try {
             processBuffer(state, data);
+        } catch (Throwable t) {
+            logger.error("站点 {} 数据拆包发生严重异常，强制清空缓冲区以恢复状态: {}", stationId, t.getMessage(), t);
+            state.buffer.clear();
         } finally {
             state.lock.unlock();
         }
@@ -219,15 +227,14 @@ public class MixedLogSplitter {
     private void processBuffer(StationState state, byte[] newData) {
         ByteBuffer buffer = state.buffer;
 
-        // 【BUG 修复 4】：拦截异常大尺寸数据，防止直接抛出 BufferOverflowException 导致线程崩溃
-        if (newData.length > MAX_BUFFER_SIZE) {
+        if (newData.length > this.maxBufferSize) {
             logger.error("站点 {} 流入数据帧过大 ({} 字节)，直接丢弃", state.stationId, newData.length);
             return;
         }
 
         if (buffer.position() + newData.length > buffer.capacity()) {
-            if (buffer.capacity() < MAX_BUFFER_SIZE) {
-                int newCapacity = Math.min(Math.max(buffer.capacity() * 2, newData.length + buffer.position()), MAX_BUFFER_SIZE);
+            if (buffer.capacity() < this.maxBufferSize) {
+                int newCapacity = Math.min(Math.max(buffer.capacity() * 2, newData.length + buffer.position()), this.maxBufferSize);
                 ByteBuffer newBuffer = ByteBuffer.allocate(newCapacity);
                 buffer.flip();
                 newBuffer.put(buffer);
@@ -411,8 +418,6 @@ public class MixedLogSplitter {
             RtklibNative.JavaObs[] obs = parseRtcmWithNative(ctx, rtcmData);
             if (obs != null && obs.length > 0) {
 
-                // 【BUG 修复 1】：从 RTKLIB 提取真实的 GNSS 历元时间 (毫秒)，而不是用 System.currentTimeMillis()
-                // 假设 JavaObs 结构体中通过 getTime() / time 等字段能获取时间戳
                 long realGnssEpochTime = extractEpochTimeFromObs(obs[0]);
                 state.currentEpochTime = realGnssEpochTime; // 更新站点的全局历元基准
 
@@ -423,8 +428,8 @@ public class MixedLogSplitter {
                     fusionService.processRtcmData(state.stationId, obs, realGnssEpochTime, obsDate, dateSource);
                 }
             }
-        } catch (Exception e) {
-            logger.error("站点 {} RTCM解析异常: {}", state.stationId, e.getMessage());
+        }catch (Throwable t) {
+            logger.error("站点 {} RTCM解析(Native)发生致命异常: {}", state.stationId, t.getMessage());
         }
 
         if (asyncProcessor != null) {
@@ -513,11 +518,11 @@ public class MixedLogSplitter {
     }
 
     private RtklibNative.JavaObs[] parseRtcmWithNative(Pointer ctx, byte[] rtcmData) {
-        int maxObs = 64;
-        RtklibNative.JavaObs.ByReference obsRef = new RtklibNative.JavaObs.ByReference();
-        RtklibNative.JavaObs[] obsArray = (RtklibNative.JavaObs[]) obsRef.toArray(maxObs);
 
-        int count = RtklibNative.INSTANCE.rtklib_parse_rtcm_frame_ex(ctx, rtcmData, rtcmData.length, obsRef, maxObs);
+        RtklibNative.JavaObs.ByReference obsRef = new RtklibNative.JavaObs.ByReference();
+        RtklibNative.JavaObs[] obsArray = (RtklibNative.JavaObs[]) obsRef.toArray(this.maxObs);
+
+        int count = RtklibNative.INSTANCE.rtklib_parse_rtcm_frame_ex(ctx, rtcmData, rtcmData.length, obsRef, this.maxObs);
         if (count <= 0) return null;
 
         RtklibNative.JavaObs[] result = new RtklibNative.JavaObs[count];

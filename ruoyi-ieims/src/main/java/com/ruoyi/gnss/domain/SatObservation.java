@@ -251,6 +251,18 @@ public class SatObservation {
     }
 
     /**
+     * 获取完整的观测日期和时间字符串（用于数据库存储）
+     */
+    public String getFullObservationTimeStr() {
+        if (observationDate != null && observationTime != null) {
+            return observationDate.format(DATE_FORMATTER) + " " + observationTime.format(TIME_FORMATTER);
+        } else if (observationTime != null) {
+            return observationTime.format(TIME_FORMATTER);
+        }
+        return null;
+    }
+
+    /**
      * 从ZonedDateTime设置日期和时间
      */
     public void setFromZonedDateTime(ZonedDateTime zdt) {
@@ -560,8 +572,7 @@ public class SatObservation {
                 ", epochTime=" + epochTime +
                 ", satNo='" + satNo + '\'' +
                 ", satSystem='" + satSystem + '\'' +
-                ", observationDate=" + getObservationDateStr() +
-                ", observationTime=" + getObservationTimeStr() +
+                ", fullObservationTime=" + getFullObservationTimeStr() +
                 ", obsUniqueKey='" + obsUniqueKey + '\'' +
                 ", dateSource='" + dateSource + '\'' +
                 ", elevation=" + elevation +
