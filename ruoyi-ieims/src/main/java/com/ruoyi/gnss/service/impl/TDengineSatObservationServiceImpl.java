@@ -19,8 +19,7 @@ import java.util.Locale;
 
 /**
  * TDengine 卫星观测数据 存储服务实现
- *
-*/
+ */
 @Service
 @ConditionalOnProperty(name = "gnss.tdengine.enabled", havingValue = "true", matchIfMissing = false)
 public class TDengineSatObservationServiceImpl implements ISatObservationStorageService {
@@ -56,9 +55,18 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
             log.debug("尝试建库失败 (云端版或已存在可忽略): {}", e.getMessage());
         }
 
-        // sys_time 设为 BIGINT，满足 TDengine STABLE 仅允许首列为主键 TIMESTAMP 的要求
+        // ==========================================
+        // 关键修复：先删除旧的、结构不匹配的超级表（清理脏数据）
+        // ==========================================
+        try {
+            tdengineUtil.executeDDL("DROP STABLE IF EXISTS " + database + "." + STABLE_NAME);
+            log.info("✅ 已清理旧的超级表，准备重建匹配的 TAGS 结构");
+        } catch (Exception e) {
+            log.debug("清理旧超级表失败忽略: {}", e.getMessage());
+        }
+
         String createSuperTableSql = String.format(
-                "CREATE STABLE IF NOT EXISTS %s (" +
+                "CREATE STABLE IF NOT EXISTS %s.%s (" +
                         "ts TIMESTAMP, " +
                         "obs_time VARCHAR(30), " +
                         "sys_time BIGINT, " +
@@ -68,10 +76,10 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
                         "s1 DOUBLE, s2 DOUBLE, s3 DOUBLE, " +
                         "elevation DOUBLE, azimuth DOUBLE" +
                         ") TAGS (station_id VARCHAR(50), sat_name VARCHAR(10))",
-                STABLE_NAME
+                database, STABLE_NAME
         );
         tdengineUtil.executeDDL(createSuperTableSql);
-        log.info("✅ 创建/确认卫星观测超级表完成: {}", STABLE_NAME);
+        log.info("✅ 创建/确认卫星观测超级表完成: {}.{}", database, STABLE_NAME);
     }
 
     @Override
@@ -102,12 +110,10 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
             return;
         }
 
-        // TDengine API 对 SQL 长度有严苛要求。强制切分为每 500 条组装一条入库。
         int batchSize = 500;
         for (int i = 0; i < obsList.size(); i += batchSize) {
             int end = Math.min(i + batchSize, obsList.size());
-            List<SatObservation> subList = obsList.subList(i, end);
-            executeBatchSql(subList);
+            executeBatchSql(obsList.subList(i, end));
         }
     }
 
@@ -115,53 +121,52 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
         try {
             StringBuilder sqlBuilder = new StringBuilder("INSERT INTO ");
 
-// 1. 按目标表名进行分组
-            java.util.Map<String, java.util.List<SatObservation>> tableGroup = new java.util.LinkedHashMap<>();
+            // 按表名分组，并使用 LinkedHashMap<Long, SatObservation> 实现同批次同时间戳(ts)强去重
+            java.util.Map<String, java.util.Map<Long, SatObservation>> tableGroup = new java.util.LinkedHashMap<>();
             for (SatObservation obs : obsList) {
-                String tableName = "satobs_" + sanitizeTableName(obs.getStationId()) + "_" + sanitizeTableName(obs.getSatNo());
-                tableGroup.computeIfAbsent(tableName, k -> new java.util.ArrayList<>()).add(obs);
+                // 显式追加数据库名，防止找不到目标表
+                String tableName = database + ".satobs_" + sanitizeTableName(obs.getStationId()) + "_" + sanitizeTableName(obs.getSatNo());
+                long ts = obs.getFullTimestamp() != null ? obs.getFullTimestamp() : System.currentTimeMillis();
+                tableGroup.computeIfAbsent(tableName, k -> new java.util.LinkedHashMap<>()).put(ts, obs);
             }
 
-            // 2. 按组拼接 SQL
-            for (java.util.Map.Entry<String, java.util.List<SatObservation>> entry : tableGroup.entrySet()) {
+            for (java.util.Map.Entry<String, java.util.Map<Long, SatObservation>> entry : tableGroup.entrySet()) {
                 String tableName = entry.getKey();
-                java.util.List<SatObservation> list = entry.getValue();
-                SatObservation firstObs = list.get(0);
+                java.util.Map<Long, SatObservation> obsMap = entry.getValue();
+                if (obsMap.isEmpty()) continue;
 
-                // 拼接表名和 TAGS (每张表只出现一次)
+                SatObservation firstObs = obsMap.values().iterator().next();
+
+                // 拼装 USING 子句
                 sqlBuilder.append(String.format(Locale.US,
-                        "%s USING %s TAGS ('%s', '%s') VALUES ",
-                        tableName, STABLE_NAME, firstObs.getStationId(), firstObs.getSatNo()
+                        "%s USING %s.%s TAGS ('%s', '%s') VALUES ",
+                        tableName, database, STABLE_NAME,
+                        sanitizeStr(firstObs.getStationId()), sanitizeStr(firstObs.getSatNo())
                 ));
 
-                // 拼接该表下的所有 VALUES
-                for (SatObservation obs : list) {
+                // 拼装该表的所有安全 VALUES
+                for (java.util.Map.Entry<Long, SatObservation> row : obsMap.entrySet()) {
+                    long ts = row.getKey();
+                    SatObservation obs = row.getValue();
+
                     sqlBuilder.append(String.format(Locale.US,
-                            "(%d, '%s', %d, '%s', '%s', '%s', %f, %f, %f, %f, %f, %f, %f, %f, %f, %f, %f) ",
-                            obs.getFullTimestamp() != null ? obs.getFullTimestamp() : System.currentTimeMillis(), // 主键 ts
-                            obs.getFullObservationTimeStr() != null ? obs.getFullObservationTimeStr() : "", // obs_time
-                            obs.getTimestamp() != null ? obs.getTimestamp() : 0L, // sys_time
-                            obs.getC1() != null ? obs.getC1() : "",
-                            obs.getC2() != null ? obs.getC2() : "",
-                            "", // c3
-                            obs.getPseudorangeP1() != null ? obs.getPseudorangeP1() : 0.0, // p1
-                            obs.getPseudorangeP2() != null ? obs.getPseudorangeP2() : 0.0, // p2
-                            0.0, // p3
-                            obs.getPhaseL1() != null ? obs.getPhaseL1() : 0.0, // l1
-                            0.0, // l2
-                            0.0, // l3
-                            obs.getSnr() != null ? obs.getSnr() : 0.0, // s1
-                            0.0, // s2
-                            0.0, // s3
-                            obs.getElevation() != null ? obs.getElevation() : 0.0,
-                            obs.getAzimuth() != null ? obs.getAzimuth() : 0.0
+                            "(%d, '%s', %d, '%s', '%s', '%s', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ",
+                            ts,
+                            sanitizeStr(obs.getFullObservationTimeStr()),
+                            obs.getTimestamp() != null ? obs.getTimestamp() : 0L,
+                            sanitizeStr(obs.getC1()), sanitizeStr(obs.getC2()), "",
+                            formatDouble(obs.getPseudorangeP1()), formatDouble(obs.getPseudorangeP2()), "0.0",
+                            formatDouble(obs.getPhaseL1()), "0.0", "0.0",
+                            formatDouble(obs.getSnr()), "0.0", "0.0",
+                            formatDouble(obs.getElevation()), formatDouble(obs.getAzimuth())
                     ));
                 }
             }
 
             tdengineUtil.executeUpdate(sqlBuilder.toString());
         } catch (Exception e) {
-            log.error("❌ 批量存储卫星观测数据单片失败: {}", e.getMessage());
+            // 打印出引发错误的根本原因 (Cause)，有助于后续排错
+            log.error("❌ 批量存储卫星观测数据单片失败: {} | Cause: {}", e.getMessage(), e.getCause() != null ? e.getCause().getMessage() : "None");
         }
     }
 
@@ -169,28 +174,37 @@ public class TDengineSatObservationServiceImpl implements ISatObservationStorage
         return name == null ? "unknown" : name.replaceAll("[^a-zA-Z0-9_]", "_");
     }
 
+    private String sanitizeStr(String val) {
+        return val == null ? "" : val.replace("'", "\\'");
+    }
+
+    /**
+     * 安全处理 Double 异常值，防止 NaN 破坏 SQL 语法
+     */
+    private String formatDouble(Double val) {
+        if (val == null || val.isNaN() || val.isInfinite()) {
+            return "NULL";
+        }
+        return String.format(Locale.US, "%f", val);
+    }
 
     @Override
     public List<SatObservation> queryByTimeRange(String stationId, long startTime, long endTime) {
-        log.debug("TDengine queryByTimeRange 暂未通过代码层实现");
         return Collections.emptyList();
     }
 
     @Override
     public List<SatObservation> queryByDate(String stationId, LocalDate date) {
-        log.debug("TDengine queryByDate 暂未通过代码层实现");
         return Collections.emptyList();
     }
 
     @Override
     public SatObservation queryByUniqueKey(String stationId, String obsUniqueKey) {
-        log.debug("TDengine queryByUniqueKey 暂未通过代码层实现");
         return null;
     }
 
     @Override
     public int deleteByTimeRange(String stationId, long startTime, long endTime) {
-        log.debug("TDengine deleteByTimeRange 暂未通过代码层实现");
         return 0;
     }
 
