@@ -175,7 +175,6 @@ public class SatelliteDataFusionService {
             return;
         }
 
-        // 【修复】从 obs.id (byte[]) 获取卫星ID字符串
         String satId = null;
         if (obs.id != null) {
             int len = 0;
@@ -208,8 +207,8 @@ public class SatelliteDataFusionService {
 
         // 【修复】obs.snr 是 float[] 类型（小写），不是 SNR
         if (obs.snr != null && obs.snr.length >= 2) {
-            rtcmData.snr1 = (double) obs.snr[0];
-            rtcmData.snr2 = (double) obs.snr[1];
+            rtcmData.snr1 = (double) (obs.snr[0] * 4.0f);
+            rtcmData.snr2 = (double) (obs.snr[1] * 4.0f);
         }
 
         // 伪距和相位
@@ -452,11 +451,11 @@ public class SatelliteDataFusionService {
         if (gsv != null) {
             obs.setElevation(gsv.getElevation());
             obs.setAzimuth(gsv.getAzimuth());
-            obs.setSnr(gsv.getSnr());
             obs.setSatSystem(gsv.getSatSystem());
+            obs.setSnr(gsv.getSnr()); // 先默认放 GSV 的整数 SNR
         }
 
-        // 合并 RTCM 数据
+        // 再合并 RTCM 数据，并用高精度值覆盖
         if (rtcm != null) {
             obs.setPseudorangeP1(rtcm.pseudorangeP1);
             obs.setPhaseL1(rtcm.phaseL1);
@@ -467,8 +466,9 @@ public class SatelliteDataFusionService {
             if (obs.getSatSystem() == null) {
                 obs.setSatSystem(rtcm.satSystem);
             }
-            // 如果 GSV 没有信噪比，使用 RTCM 的
-            if (obs.getSnr() == null && rtcm.snr1 != null) {
+
+            // 【核心修复】只要 RTCM 有高精度 SNR（且大于 0），就强行覆盖 GSV 的粗糙整数 SNR
+            if (rtcm.snr1 != null && rtcm.snr1 > 0) {
                 obs.setSnr(rtcm.snr1);
             }
         }
