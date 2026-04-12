@@ -22,7 +22,7 @@ import java.util.*;
 import java.util.concurrent.*;
 
 /**
- * 卫星数据融合服务（修复版）
+ * 卫星数据融合服务
  *
  * 功能：
  * 1. 缓存 GSV 数据（仰角、方位角、信噪比）
@@ -447,7 +447,12 @@ public class SatelliteDataFusionService {
             obs.setEpochTime(rtcm.epochTime);
         }
 
-        // 合并 GSV 数据
+        /*
+         * 【数据融合步骤 1：装载 GSV 数据】
+         * GSV (NMEA) 提供了天空视图几何信息，这些是 RTCM 中没有的：
+         * 包含: 仰角 (Elevation)、方位角 (Azimuth)。
+         * 注意: GSV 提供的信噪比(SNR)是四舍五入后的整数，精度较低。
+         */
         if (gsv != null) {
             obs.setElevation(gsv.getElevation());
             obs.setAzimuth(gsv.getAzimuth());
@@ -455,7 +460,12 @@ public class SatelliteDataFusionService {
             obs.setSnr(gsv.getSnr()); // 先默认放 GSV 的整数 SNR
         }
 
-        // 再合并 RTCM 数据，并用高精度值覆盖
+        /*
+         * 【数据融合步骤 2：装载 RTCM 数据并覆盖高精度值】
+         * RTCM 提供了核心的物理测量值，这些是 GSV 中绝对没有的：
+         * 包含: L1/L2 载波相位 (Phase)、P1/P2 伪距 (Pseudorange)、频点代码 (Code)。
+         * 关键策略: 如果 RTCM 带有高精度浮点型信噪比(SNR1)，必须强制覆盖掉 GSV 的低精度整数 SNR。
+         */
         if (rtcm != null) {
             obs.setPseudorangeP1(rtcm.pseudorangeP1);
             obs.setPhaseL1(rtcm.phaseL1);

@@ -21,19 +21,9 @@ import java.util.Locale;
  * TDengine NMEA 存储服务实现
  *
  * <p>
- * 优化内容：
- * 1. 缓存表名，避免重复计算
- * 2. 使用 volatile 修饰 initialized 保证可见性
- * 3. 添加统计计数器
- * 4. 支持多站点
- * 5. 使用 JdbcTemplate 的批量 PreparedStatement 替代字符串拼接，彻底杜绝 SQL 注入并大幅提升批量写入性能
+ * 负责将接收到的 纯文本 NMEA 0183 原始字符串 原封不动地存入 TDengine（st_nmea_raw 超级表）。
  * </p>
  *
- * <p>
- * v2.1 修复内容：
- * 1. 使用 TDengineUtil.useDatabase() 替代直接执行 USE 语句
- * 2. 确保数据库存在后再切换
- * </p>
  *
  * @author GNSS Team
  */

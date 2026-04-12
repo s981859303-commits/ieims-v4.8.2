@@ -141,6 +141,9 @@ public class ZdaParser {
     }
 
     /**
+     * 【GNZDA】多系统混合时间与日期数据
+     * 格式: $GNZDA,hhmmss.ss,dd,mm,yyyy,xx,yy*CC
+     * 作用: GSV 和 GGA 报文通常只带时分秒(hhmmss)，需要借助 ZDA 获取绝对的年月日
      * 解析 ZDA 语句并返回完整结果对象
      *
      * @param nmea NMEA 语句字符串

@@ -52,16 +52,18 @@ public class GsvParser {
 
     // ==================== 常量定义 ====================
 
-    /** GSV 语句前缀列表 */
+    /** * GSV 语句前缀列表及对应卫星系统
+     * 字段提取：卫星PRN号、仰角(度)、方位角(度)、信噪比(dB-Hz)
+     */
     private static final String[] GSV_PREFIXES = {
-            "$GPGSV",  // GPS
-            "$GLGSV",  // GLONASS
-            "$GAGSV",  // Galileo
-            "$GBGSV",  // BDS (BeiDou)
-            "$BDGSV",  // BDS (BeiDou, alternative)
-            "$QZGSV",  // QZSS
-            "$IGSV",   // IRNSS
-            "$GNGSV"   // Multi-GNSS
+            "$GPGSV",  // GPS系统可视卫星
+            "$GLGSV",  // GLONASS系统可视卫星
+            "$GAGSV",  // Galileo系统可视卫星
+            "$GBGSV",  // 北斗系统(BDS)可视卫星 (常用标准)
+            "$BDGSV",  // 北斗系统(BDS)可视卫星 (早期/部分厂家非标)
+            "$QZGSV",  // QZSS(日本准天顶)系统可视卫星
+            "$IGSV",   // IRNSS(印度区域)系统可视卫星
+            "$GNGSV"   // 多系统混合可视卫星
     };
 
     /** 每条GSV语句最多包含的卫星数 */

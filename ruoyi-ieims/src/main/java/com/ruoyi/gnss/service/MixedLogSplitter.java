@@ -307,7 +307,7 @@ public class MixedLogSplitter {
     }
 
     /**
-     * 【核心修复】处理 NMEA 语句
+     * 处理 NMEA 语句
      *
      * 修改说明：
      * 1. 先执行业务逻辑处理（ZDA/GSV/GGA）
@@ -324,20 +324,34 @@ public class MixedLogSplitter {
 
         // ==================== 业务逻辑处理 ====================
 
-        // 处理 ZDA 语句（时间日期）
+        /*
+         * 【$GNZDA / $GPZDA / $BDZDA】
+         * 含义：时间与日期数据。
+         * 作用：为整个系统提供绝对的 UTC 日期基准 (解决跨天边界问题)。
+         */
         if (zdaParser.isZdaSentence(trimmed)) {
             processZda(state, trimmed);
             // 【修复】不再直接 return，继续判断是否入库
         }
-        // 处理 GSV 语句（卫星可见数据）
+
+        /*
+         * 【$GPGSV / $GBGSV / $GLGSV / $GNGSV】
+         * 含义：可视卫星天空视图 (Satellites in View)。
+         * 作用：提供当前天上卫星的宏观状态，提取关键要素：仰角(Elevation)、方位角(Azimuth)、信噪比(SNR)。
+         * 特点：一条语句最多装 4 颗卫星，不含高精度伪距，天生 SNR 为整数。
+         */
         else if (gsvParser.isGsvSentence(trimmed)) {
             processGsv(state, trimmed);
             // 【修复】不再直接 return，继续判断是否入库
         }
-        // 处理 GGA 语句（定位数据）
+
+        /*
+         * 【$GNGGA / $GPGGA / $BDGGA】
+         * 含义：GNSS 3D 定位数据 (Fix Data)。
+         * 作用：提供接收机当前的最核心定位解算结果，包括：经纬度、海拔高程、定位状态(单点/差分/RTK固定/浮点)。
+         */
         else if (isGgaSentence(trimmed)) {
             processGga(state, trimmed);
-            // 【修复】不再直接 return，继续判断是否入库
         }
 
         // ==================== 入库白名单过滤 ====================
@@ -410,11 +424,23 @@ public class MixedLogSplitter {
         }
     }
 
+    /**
+     * 处理 RTCM3 二进制原始数据流
+     */
     private void processRtcm(StationState state, byte[] rtcmData) {
         Pointer ctx = contextManager.getOrCreateContext(state.stationId);
         if (ctx == null) return;
 
         try {
+            /*
+             * 【RTCM 格式数据】(Radio Technical Commission for Maritime Services)
+             * 含义：高精度 GNSS 差分/原始观测值二进制传输协议 (如 MSM4/MSM7 报文)。
+             * 作用：这是电离层研究和 RTK 解算必需的最底层科学数据。
+             * 产出：通过底层 DLL (RTKLIB) 解码后，能获取极其精确的：
+             * 1. 伪距 (Pseudorange P1/P2)
+             * 2. 载波相位 (Carrier Phase L1/L2)
+             * 3. 高精度双频信噪比 (SNR)
+             */
             RtklibNative.JavaObs[] obs = parseRtcmWithNative(ctx, rtcmData);
             if (obs != null && obs.length > 0) {
 

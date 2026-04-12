@@ -15,6 +15,9 @@ import java.util.Locale;
 /**
  * TDengine RTCM 存储服务实现
  *
+ * <p>
+ * 负责将接收到的 RTCM 原始二进制差分数据流 转换为 Base64 编码后，存入 TDengine（st_rtcm_raw 超级表）。
+ * </p>
  */
 @Service
 @ConditionalOnProperty(name = "gnss.tdengine.enabled", havingValue = "true", matchIfMissing = false)

@@ -19,6 +19,11 @@ import java.util.Locale;
 
 /**
  * TDengine 卫星观测数据 存储服务实现
+ *
+ * <p>
+ * 负责接收 SatelliteDataFusionService 融合后产出的 SatObservation 实体，并将其存入 TDengine（st_sat_observation 超级表）。
+ * </p>
+ *
  */
 @Service
 @ConditionalOnProperty(name = "gnss.tdengine.enabled", havingValue = "true", matchIfMissing = false)

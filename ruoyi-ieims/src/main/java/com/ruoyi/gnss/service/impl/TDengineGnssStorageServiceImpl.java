@@ -17,9 +17,7 @@ import java.util.Locale;
  * TDengine GNSS 存储服务实现
  *
  * <p>
- * 修复内容：
- * 1. 使用 TDengineUtil.useDatabase() 替代直接执行 USE 语句
- * 2. 确保数据库存在后再切换
+ * 负责将算法最终解算出来的 GNSS 3D 定位结果 存入 TDengine（st_gnss_solution 超级表）。
  * </p>
  */
 @Service
