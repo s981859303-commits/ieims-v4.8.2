@@ -1,6 +1,6 @@
-package com.ruoyi.gnss.service;
+package com.ruoyi.ieims.gnss.service;
 
-import com.ruoyi.gnss.domain.GsvSatelliteData;
+import com.ruoyi.ieims.gnss.domain.GsvSatelliteData;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;

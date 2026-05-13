@@ -1,4 +1,4 @@
-package com.ruoyi.gnss.domain;
+package com.ruoyi.ieims.gnss.domain;
 
 import java.util.Date;
 
@@ -7,6 +7,7 @@ import java.util.Date;
  */
 public class GnssSolution {
 
+    private String stationId;
     private Date time;
     private double latitude;
     private double longitude;
@@ -16,7 +17,6 @@ public class GnssSolution {
     private double hdop;
     private String solutionType;
 
-    public GnssSolution() {}
 
     public GnssSolution(Date time, double latitude, double longitude, double altitude,
                         int status, int satelliteCount) {
@@ -38,6 +38,7 @@ public class GnssSolution {
     public int getSatelliteCount() { return satelliteCount; }
     public double getHdop() { return hdop; }
     public String getSolutionType() { return solutionType; }
+    public String getStationId() {return stationId;}
 
     // --- Setter 方法 ---
     public GnssSolution setTime(Date time) { this.time = time; return this; }
@@ -47,6 +48,7 @@ public class GnssSolution {
     public GnssSolution setStatus(int status) { this.status = status; this.solutionType = getSolutionTypeByStatus(status); return this; }
     public GnssSolution setSatelliteCount(int satelliteCount) { this.satelliteCount = satelliteCount; return this; }
     public GnssSolution setHdop(double hdop) { this.hdop = hdop; return this; }
+    public void setStationId(String stationId) {this.stationId = stationId;}
 
     public static String getSolutionTypeByStatus(int status) {
         switch (status) {

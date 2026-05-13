@@ -1,12 +1,12 @@
-package com.ruoyi.gnss.domain;
+package com.ruoyi.ieims.gnss.domain;
 
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.Date;
 import java.util.Objects;
+import com.alibaba.fastjson.annotation.JSONField;
 
 /**
  * 卫星观测数据实体类
@@ -49,6 +49,9 @@ public class SatObservation {
 
     /** 信噪比（dB-Hz） */
     private Double snr;
+
+    /** 信噪比2（dB-Hz）- L2频点，仅RTCM提供 */
+    private Double snr2;
 
     /** 伪距P1（米）- L1频点伪距 */
     private Double pseudorangeP1;
@@ -237,22 +240,25 @@ public class SatObservation {
     }
 
     /**
-     * 获取日期字符串（用于数据库存储）
+     * 获取日期字符串（用于数据库存储，MQTT中隐藏）
      */
+    @JSONField(serialize = false)
     public String getObservationDateStr() {
         return observationDate != null ? observationDate.format(DATE_FORMATTER) : null;
     }
 
     /**
-     * 获取时间字符串（用于数据库存储）
+     * 获取时间字符串（用于数据库存储，MQTT中隐藏）
      */
+    @JSONField(serialize = false)
     public String getObservationTimeStr() {
         return observationTime != null ? observationTime.format(TIME_FORMATTER) : null;
     }
 
     /**
-     * 获取完整的观测日期和时间字符串（用于数据库存储）
+     * 获取完整的观测日期和时间字符串（用于数据库存储，MQTT中隐藏）
      */
+    @JSONField(serialize = false)
     public String getFullObservationTimeStr() {
         if (observationDate != null && observationTime != null) {
             return observationDate.format(DATE_FORMATTER) + " " + observationTime.format(TIME_FORMATTER);
@@ -275,7 +281,7 @@ public class SatObservation {
         }
     }
 
-    // ==================== 原有Getter/Setter方法 ====================
+    // ==================== Getter/Setter方法 ====================
 
     public Long getTimestamp() {
         return timestamp;
@@ -312,7 +318,7 @@ public class SatObservation {
     }
 
     public Double getElevation() {
-        return elevation;
+        return elevation != null ? elevation : 0.0;
     }
 
     public void setElevation(Double elevation) {
@@ -320,7 +326,7 @@ public class SatObservation {
     }
 
     public Double getAzimuth() {
-        return azimuth;
+        return azimuth != null ? azimuth : 0.0;
     }
 
     public void setAzimuth(Double azimuth) {
@@ -328,15 +334,17 @@ public class SatObservation {
     }
 
     public Double getSnr() {
-        return snr;
+        return snr != null ? snr : 0.0;
     }
 
-    public void setSnr(Double snr) {
-        this.snr = snr;
-    }
+    public void setSnr(Double snr) { this.snr = snr; }
+
+    public Double getSnr2() { return snr2 != null ? snr2 : 0.0; }
+
+    public void setSnr2(Double snr2) { this.snr2 = snr2; }
 
     public Double getPseudorangeP1() {
-        return pseudorangeP1;
+        return pseudorangeP1 != null ? pseudorangeP1 : 0.0;
     }
 
     public void setPseudorangeP1(Double pseudorangeP1) {
@@ -344,7 +352,7 @@ public class SatObservation {
     }
 
     public Double getPhaseL1() {
-        return phaseL1;
+        return phaseL1 != null ? phaseL1 : 0.0;
     }
 
     public void setPhaseL1(Double phaseL1) {
@@ -352,7 +360,7 @@ public class SatObservation {
     }
 
     public Double getPseudorangeP2() {
-        return pseudorangeP2;
+        return pseudorangeP2 != null ? pseudorangeP2 : 0.0;
     }
 
     public void setPseudorangeP2(Double pseudorangeP2) {
@@ -360,7 +368,7 @@ public class SatObservation {
     }
 
     public Double getPhaseP2() {
-        return phaseP2;
+        return phaseP2 != null ? phaseP2 : 0.0;
     }
 
     public void setPhaseP2(Double phaseP2) {
@@ -368,7 +376,7 @@ public class SatObservation {
     }
 
     public String getC1() {
-        return c1;
+        return c1 != null ? c1 : "";
     }
 
     public void setC1(String c1) {
@@ -376,7 +384,7 @@ public class SatObservation {
     }
 
     public String getC2() {
-        return c2;
+        return c2 != null ? c2 : "";
     }
 
     public void setC2(String c2) {
@@ -391,8 +399,7 @@ public class SatObservation {
         this.dataSource = dataSource;
     }
 
-    // ==================== 新增字段Getter/Setter方法 ====================
-
+    @JSONField(serialize = false)
     public LocalDate getObservationDate() {
         return observationDate;
     }
@@ -403,8 +410,27 @@ public class SatObservation {
         generateUniqueKey();
     }
 
+    @JSONField(serialize = false)
     public LocalTime getObservationTime() {
         return observationTime;
+    }
+
+    /**
+     * 专为 MQTT/JSON 输出设计的合并时间字段
+     * Fastjson 会自动将此方法序列化为 JSON 中的 "observationTime" 键
+     */
+    @JSONField(name = "observationTime")
+    public String getFormattedObservationTime() {
+        if (observationDate != null && observationTime != null) {
+            // 如果您不需要毫秒，格式化为 "yyyy-MM-dd HH:mm:ss"
+            // 如果需要保留毫秒，可改为 "yyyy-MM-dd HH:mm:ss.SSS"
+            java.time.format.DateTimeFormatter formatter =
+                    java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
+            return java.time.LocalDateTime.of(observationDate, observationTime).format(formatter);
+        } else if (observationTime != null) {
+            return observationTime.format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss.SSS"));
+        }
+        return null;
     }
 
     public String getObsUniqueKey() {
@@ -415,6 +441,10 @@ public class SatObservation {
         this.obsUniqueKey = obsUniqueKey;
     }
 
+    /**
+     * 完整时间戳（毫秒级，若前端不需要也可隐藏）
+     */
+    @JSONField(serialize = false)
     public Long getFullTimestamp() {
         if (fullTimestamp == null) {
             calculateFullTimestamp();
@@ -501,6 +531,7 @@ public class SatObservation {
         if (other.elevation != null) this.elevation = other.elevation;
         if (other.azimuth != null) this.azimuth = other.azimuth;
         if (other.snr != null) this.snr = other.snr;
+        if (other.snr2 != null) this.snr2 = other.snr2;
 
         // 合并RTCM数据
         if (other.pseudorangeP1 != null) this.pseudorangeP1 = other.pseudorangeP1;
@@ -536,6 +567,7 @@ public class SatObservation {
         copy.elevation = this.elevation;
         copy.azimuth = this.azimuth;
         copy.snr = this.snr;
+        copy.snr2 = this.snr2;
         copy.pseudorangeP1 = this.pseudorangeP1;
         copy.phaseL1 = this.phaseL1;
         copy.pseudorangeP2 = this.pseudorangeP2;

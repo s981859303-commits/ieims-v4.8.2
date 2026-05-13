@@ -1,4 +1,4 @@
-package com.ruoyi.gnss.service;
+package com.ruoyi.ieims.gnss.service;
 
 import org.eclipse.paho.client.mqttv3.*;
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
@@ -82,7 +82,7 @@ public class GnssMqttService implements MqttCallbackExtended {
         });
 
         initConnectOptions();
-        connect();
+        reconnectScheduler.submit(this::connect);
     }
 
     private void initConnectOptions() {
@@ -91,6 +91,8 @@ public class GnssMqttService implements MqttCallbackExtended {
         connectOptions.setAutomaticReconnect(true);
         connectOptions.setConnectionTimeout(connectionTimeout);
         connectOptions.setKeepAliveInterval(keepAliveInterval);
+
+        connectOptions.setMaxInflight(1000);
 
         if (username != null && !username.isEmpty()) {
             connectOptions.setUserName(username);
@@ -145,14 +147,20 @@ public class GnssMqttService implements MqttCallbackExtended {
                 return;
             }
 
-            // 1. 从 MQTT Topic 中动态提取站点 ID
-            // 例如 topic 为 "ieims/gnss/data/8900_2"，截取最后一段得到 "8900_2"
+            // 1. 从 MQTT Topic 中精确提取站点 ID（支持多层级通配符）
             String stationId = extractStationIdFromTopic(topic);
+
+//            // ================== 🛑 新增：黑名单拦截逻辑 ==================
+//            // 屏蔽 guet_test2 站点的数据，直接丢弃不解析、不落盘
+//            if ("guet_test2".equals(stationId)) {
+//                return;
+//            }
+//            // ==============================================================
 
             logger.debug("收到 MQTT 消息，站点: {}, 长度: {} 字节", stationId, rawBytes.length);
 
             if (splitter != null) {
-                // 2. 将站点上下文绑定到当前线程（防御性编程，配合你代码里的 StationContext）
+                // 2. 将站点上下文绑定到当前线程（防御性编程，配合你的 StationContext）
                 StationContext.runWithStation(stationId, () -> {
                     // 3. 调用带 stationId 参数的 pushData 方法
                     splitter.pushDataWithStation(stationId, rawBytes);
@@ -165,14 +173,37 @@ public class GnssMqttService implements MqttCallbackExtended {
     }
 
     /**
-     * 辅助方法：从 Topic 中提取站点 ID
+     * 辅助方法：从 Topic 中精准提取站点 ID (升级版)
+     * 完美兼容类似 "/ieims/gnss/data/station_01/nmea" 的多级路径
      */
     private String extractStationIdFromTopic(String topic) {
-        if (topic != null && topic.contains("/")) {
-            // 截取最后一个 '/' 之后的内容作为 stationId
+        if (topic == null || topic.isEmpty()) {
+            return "default_station";
+        }
+
+        // 1. 去除可能存在的开头斜杠，统一格式化
+        String cleanTopic = topic.startsWith("/") ? topic.substring(1) : topic;
+        String prefix = "ieims/gnss/data/";
+
+        // 2. 精准提取站点名称
+        if (cleanTopic.startsWith(prefix)) {
+            // 截去前缀，剩下类似 "guet_test2" 或 "guet_test2/nmea"
+            String remainder = cleanTopic.substring(prefix.length());
+            int nextSlash = remainder.indexOf('/');
+
+            // 如果有更深层级，只取第一段作为站点名；否则全取
+            if (nextSlash != -1) {
+                return remainder.substring(0, nextSlash);
+            } else {
+                return remainder;
+            }
+        }
+
+        // 3. 兜底策略：如果前缀不匹配，按原来的逻辑取最后一个 '/' 之后的内容
+        if (topic.contains("/")) {
             return topic.substring(topic.lastIndexOf('/') + 1);
         }
-        // 如果解析失败，回退到默认站点
+
         return "default_station";
     }
 
@@ -254,4 +285,15 @@ public class GnssMqttService implements MqttCallbackExtended {
 
         logger.info("MQTT 服务已关闭");
     }
+
+    @Autowired
+    private RtklibContextManager contextManager;
+
+    // 在监听到站点断开时调用
+    public void onStationOffline(String stationId) {
+        logger.info("检测到站点离线，释放 RTKLIB Context: {}", stationId);
+        contextManager.forceDestroyContext(stationId);
+    }
+
 }
+

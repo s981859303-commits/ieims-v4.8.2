@@ -1,11 +1,11 @@
-package com.ruoyi.gnss.domain;
+package com.ruoyi.ieims.gnss.domain;
 
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.Objects;
 
 /**
- * GSV 卫星数据实体类（增强版）
+ * GSV 卫星数据实体类
  *
  * 来源：GPGSV / GBGSV / GLGSV / GAGSV 语句
  *

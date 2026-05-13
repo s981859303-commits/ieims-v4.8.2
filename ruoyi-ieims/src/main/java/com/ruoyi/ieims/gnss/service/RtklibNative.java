@@ -1,4 +1,4 @@
-package com.ruoyi.gnss.service;
+package com.ruoyi.ieims.gnss.service;
 
 import com.sun.jna.Library;
 import com.sun.jna.Native;
@@ -19,18 +19,27 @@ public interface RtklibNative extends Library {
 
     // 加载项目根目录下的 rtklib_bridge.dll
     RtklibNative INSTANCE = Native.load("rtklib_bridge", RtklibNative.class);
+//    RtklibNative INSTANCE = Native.load("D:\\dev2026\\ieims\\dev2026\\ieims-v4.8.2\\ruoyi-ieims\\src\\main\\resources\\win32-x86-64/rtklib_bridge.dll", RtklibNative.class);
 
     /**
      * 观测数据结构体
      */
-    @Structure.FieldOrder({"sat", "P", "L", "snr", "id", "code"})
-    public static class JavaObs extends Structure {
+    @Structure.FieldOrder({"time", "sec", "pad1", "sat", "P", "L", "snr", "id", "code", "pad2"})public static class JavaObs extends Structure {
+        public JavaObs() {
+            super(ALIGN_NONE);
+        }
+
+        // 注意：如果 C++ 端的 time 是 32 位 int/long，这里必须改为 public int time; 否则永远错位
+        public long time;                    // GNSS时间 (秒)
+        public double sec;                   // GNSS时间 (小数秒)
+        public int pad1;                     // 4字节占位
         public int sat;                      // 卫星号
         public double[] P = new double[3];   // 伪距 (3个频点)
         public double[] L = new double[3];   // 载波相位 (3个频点)
         public float[] snr = new float[3];   // 信噪比 (3个频点)
         public byte[] id = new byte[8];      // 卫星ID字符串
         public byte[] code = new byte[24];   // 信号代码 (3个频点，每个8字节)
+        public int pad2;                     // 4字节 【新增：尾部填充满120字节】
 
         public static class ByReference extends JavaObs implements Structure.ByReference {}
         public static class ByValue extends JavaObs implements Structure.ByValue {}

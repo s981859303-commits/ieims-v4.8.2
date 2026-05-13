@@ -1,4 +1,6 @@
-package com.ruoyi.gnss.service;
+package com.ruoyi.ieims.gnss.service;
+
+import java.nio.charset.StandardCharsets;
 
 /**
  * 卫星编号统一转换工具类
@@ -45,6 +47,43 @@ public class SatNoConverter {
 
     /** 未知系统前缀 */
     public static final char PREFIX_UNKNOWN = 'X';
+
+    private static final String[][] SAT_CACHE = new String[128][100];
+
+    static {
+        // 预加载所有可能的卫星编号字符串到内存，彻底消灭 String 分配
+        char[] prefixes = {PREFIX_GPS, PREFIX_BDS, PREFIX_GLO, PREFIX_GAL, PREFIX_UNKNOWN, 'J', 'I', 'S'};
+        for (char p : prefixes) {
+            for (int i = 0; i < 100; i++) {
+                SAT_CACHE[p][i] = String.format("%c%02d", p, i);
+            }
+        }
+    }
+
+    /**
+     * 直接从底层 C 语言传来的 byte[] id 中提取卫星号
+     * 避免使用 new String(byte[]) 产生大量 GC
+     */
+    public static String fromRtcmSatIdBytes(byte[] idBytes) {
+        if (idBytes == null || idBytes.length < 1 || idBytes[0] == 0) {
+            return null;
+        }
+
+        char prefix = (char) idBytes[0];
+
+        // 检查是否是标准的 "G01", "C05" 格式（长度>=3，且后两位是数字）
+        if (idBytes.length >= 3 && isSatPrefix(prefix) && isDigit((char) idBytes[1]) && isDigit((char) idBytes[2])) {
+            int prn = (idBytes[1] - '0') * 10 + (idBytes[2] - '0');
+            return formatSatNo(prefix, prn);
+        }
+
+        // 降级处理：如果不标准，使用传统的字符串解析
+        int len = 0;
+        while (len < idBytes.length && idBytes[len] != 0) {
+            len++;
+        }
+        return new String(idBytes, 0, len, StandardCharsets.US_ASCII).trim();
+    }
 
     /**
      * 将卫星系统和PRN号转换为统一格式

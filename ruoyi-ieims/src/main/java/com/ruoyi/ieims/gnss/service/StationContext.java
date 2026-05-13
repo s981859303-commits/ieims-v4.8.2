@@ -1,4 +1,4 @@
-package com.ruoyi.gnss.service;
+package com.ruoyi.ieims.gnss.service;
 
 /**
  * 站点上下文管理器

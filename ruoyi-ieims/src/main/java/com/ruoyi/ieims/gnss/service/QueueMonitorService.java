@@ -1,4 +1,4 @@
-package com.ruoyi.gnss.service;
+package com.ruoyi.ieims.gnss.service;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -75,16 +75,24 @@ public class QueueMonitorService {
 
     // ==================== 内部状态 ====================
 
-    /** 队列状态映射 */
+    /**
+     * 队列状态映射
+     */
     private final ConcurrentHashMap<String, QueueState> queueStates = new ConcurrentHashMap<>();
 
-    /** 告警监听器列表 */
+    /**
+     * 告警监听器列表
+     */
     private final List<Consumer<QueueAlertEvent>> alertListeners = new CopyOnWriteArrayList<>();
 
-    /** 监控调度器 */
+    /**
+     * 监控调度器
+     */
     private ScheduledExecutorService scheduler;
 
-    /** 运行状态 */
+    /**
+     * 运行状态
+     */
     private final AtomicBoolean running = new AtomicBoolean(false);
 
     // ==================== 初始化与销毁 ====================
@@ -106,7 +114,7 @@ public class QueueMonitorService {
         scheduler.scheduleAtFixedRate(this::checkAllQueues, checkIntervalMs, checkIntervalMs, TimeUnit.MILLISECONDS);
 
         logger.info("队列监控服务已启动，检查间隔: {}ms, 告警阈值: warning={}/critical={}/emergency={}",
-                checkIntervalMs, (int)(warningThreshold * 100), (int)(criticalThreshold * 100), (int)(emergencyThreshold * 100));
+                checkIntervalMs, (int) (warningThreshold * 100), (int) (criticalThreshold * 100), (int) (emergencyThreshold * 100));
     }
 
     @PreDestroy
@@ -131,9 +139,9 @@ public class QueueMonitorService {
     /**
      * 注册队列进行监控
      *
-     * @param queueName   队列名称
-     * @param queue       队列实例
-     * @param capacity    队列容量
+     * @param queueName 队列名称
+     * @param queue     队列实例
+     * @param capacity  队列容量
      */
     public void registerQueue(String queueName, BlockingQueue<?> queue, int capacity) {
         registerQueue(queueName, queue, capacity, null);
@@ -142,10 +150,10 @@ public class QueueMonitorService {
     /**
      * 注册队列进行监控（带站点ID）
      *
-     * @param queueName   队列名称
-     * @param queue       队列实例
-     * @param capacity    队列容量
-     * @param stationId   站点ID（可选）
+     * @param queueName 队列名称
+     * @param queue     队列实例
+     * @param capacity  队列容量
+     * @param stationId 站点ID（可选）
      */
     public void registerQueue(String queueName, BlockingQueue<?> queue, int capacity, String stationId) {
         QueueState state = new QueueState(queueName, queue, capacity, stationId, speedCheckWindowMs, highUsageThreshold);
@@ -410,9 +418,9 @@ public class QueueMonitorService {
     /**
      * 更新告警阈值（运行时动态调整）
      *
-     * @param warning    警告阈值 (0.0-1.0)
-     * @param critical   严重阈值 (0.0-1.0)
-     * @param emergency  紧急阈值 (0.0-1.0)
+     * @param warning   警告阈值 (0.0-1.0)
+     * @param critical  严重阈值 (0.0-1.0)
+     * @param emergency 紧急阈值 (0.0-1.0)
      */
     public void updateThresholds(double warning, double critical, double emergency) {
         if (warning < 0 || warning > 1 || critical < 0 || critical > 1 || emergency < 0 || emergency > 1) {
@@ -427,7 +435,7 @@ public class QueueMonitorService {
         this.emergencyThreshold = emergency;
 
         logger.info("告警阈值已更新: warning={}/critical={}/emergency={}",
-                (int)(warning * 100), (int)(critical * 100), (int)(emergency * 100));
+                (int) (warning * 100), (int) (critical * 100), (int) (emergency * 100));
     }
 
     /**
@@ -447,7 +455,7 @@ public class QueueMonitorService {
             state.highUsageThreshold = threshold;
         }
 
-        logger.info("高使用率阈值已更新: {}", (int)(threshold * 100));
+        logger.info("高使用率阈值已更新: {}", (int) (threshold * 100));
     }
 
     /**
@@ -550,7 +558,7 @@ public class QueueMonitorService {
 
     /**
      * 队列状态内部类
-     *
+     * <p>
      * 修复说明：将 speedCheckWindowMs 和 highUsageThreshold 作为构造函数参数传入，
      * 解决静态内部类无法访问外部类实例字段的问题
      */
@@ -573,8 +581,12 @@ public class QueueMonitorService {
         final AtomicLong totalConsumed = new AtomicLong(0);
         final AtomicLong totalDropped = new AtomicLong(0);
 
-        final ConcurrentLinkedDeque<long[]> produceHistory = new ConcurrentLinkedDeque<>();
-        final ConcurrentLinkedDeque<long[]> consumeHistory = new ConcurrentLinkedDeque<>();
+        // --- 取代 ConcurrentLinkedDeque，彻底消除高频 GC ---
+        private volatile double currentProduceRate = 0.0;
+        private volatile double currentConsumeRate = 0.0;
+        private long lastSnapshotTime = System.currentTimeMillis();
+        private long lastProduceCount = 0;
+        private long lastConsumeCount = 0;
 
         QueueState(String queueName, BlockingQueue<?> queue, int capacity, String stationId,
                    long speedCheckWindowMs, double highUsageThreshold) {
@@ -597,48 +609,46 @@ public class QueueMonitorService {
             }
         }
 
+        // 极限优化：只做原子累加，绝不 new 对象
         void recordProduce() {
             totalProduced.incrementAndGet();
-            long now = System.currentTimeMillis();
-            produceHistory.addLast(new long[]{now, 1});
-            cleanupHistory(produceHistory, now);
         }
 
         void recordConsume() {
             totalConsumed.incrementAndGet();
-            long now = System.currentTimeMillis();
-            consumeHistory.addLast(new long[]{now, 1});
-            cleanupHistory(consumeHistory, now);
         }
 
         void recordDrop() {
             totalDropped.incrementAndGet();
         }
 
-        void cleanupHistory(ConcurrentLinkedDeque<long[]> history, long now) {
-            long cutoff = now - speedCheckWindowMs * 2;
-            while (!history.isEmpty() && history.peekFirst()[0] < cutoff) {
-                history.pollFirst();
-            }
-        }
-
+        // 获取速率时，由定时线程 (checkQueue) 计算差值
         double getProduceRate(long now) {
-            return calculateRate(produceHistory, now);
+            calculateRates(now);
+            return currentProduceRate;
         }
 
         double getConsumeRate(long now) {
-            return calculateRate(consumeHistory, now);
+            calculateRates(now);
+            return currentConsumeRate;
         }
 
-        private double calculateRate(ConcurrentLinkedDeque<long[]> history, long now) {
-            long cutoff = now - speedCheckWindowMs;
-            int count = 0;
-            for (long[] entry : history) {
-                if (entry[0] >= cutoff) {
-                    count++;
-                }
+        // O(1) 复杂度的速率计算，彻底干掉遍历和垃圾回收
+        private synchronized void calculateRates(long now) {
+            long elapsed = now - lastSnapshotTime;
+            // 避免频繁计算，限制至少过了指定的时间窗的一半才重新算一次
+            if (elapsed >= (speedCheckWindowMs / 2)) {
+                long currentP = totalProduced.get();
+                long currentC = totalConsumed.get();
+
+                // (当前总数 - 上次总数) / 时间差(秒) = 条/秒
+                currentProduceRate = (currentP - lastProduceCount) * 1000.0 / elapsed;
+                currentConsumeRate = (currentC - lastConsumeCount) * 1000.0 / elapsed;
+
+                lastProduceCount = currentP;
+                lastConsumeCount = currentC;
+                lastSnapshotTime = now;
             }
-            return count * 1000.0 / speedCheckWindowMs;
         }
 
         long getBacklogDurationMs(long now) {

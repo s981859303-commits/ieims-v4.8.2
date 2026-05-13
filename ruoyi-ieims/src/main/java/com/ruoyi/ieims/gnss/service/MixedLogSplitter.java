@@ -1,10 +1,8 @@
-package com.ruoyi.gnss.service;
+package com.ruoyi.ieims.gnss.service;
 
-import com.ruoyi.gnss.domain.GnssSolution;
-import com.ruoyi.gnss.domain.NmeaRecord;
-import com.ruoyi.gnss.domain.SatObservation;
-import com.ruoyi.gnss.domain.GsvSatelliteData;
-import com.ruoyi.gnss.service.impl.SatelliteDataFusionService;
+import com.ruoyi.ieims.gnss.domain.GnssSolution;
+import com.ruoyi.ieims.gnss.domain.GsvSatelliteData;
+import com.ruoyi.ieims.gnss.service.impl.SatelliteDataFusionService;
 import com.sun.jna.Pointer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,12 +11,10 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.PostConstruct;
-import java.nio.BufferOverflowException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.time.LocalTime;
-import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -35,17 +31,13 @@ import java.util.concurrent.locks.ReentrantLock;
  * 3. 提取真实的 GNSS 历元时间进行数据对齐
  * 4. 融合 GSV 和 RTCM 数据，关联完整日期时间
  *
- * 【重构修复项】
- * 1. 修复：彻底解决 NIO 缓冲区 NMEA 语句解析越界和漏判 '\n' 的 Bug。
- * 2. 修复：新增 RTCM3 的 CRC24Q 校验，解决乱码导致的数据黑洞问题。
- * 3. 修复：安全防御 BufferOverflowException，抛弃超大异常帧。
- * 4. 修复：停止使用系统网络时间对齐数据，改用 RTCM 解析出的真实 GNSS 周内秒历元时间。
- * 5. 【新增】NMEA 语句入库白名单过滤机制，只入库业务需要的语句类型。
- *
- * @version 2.2 - 2026-04-03 新增 NMEA 入库白名单过滤机制
- */
+ * @version 2.5 - 2026-04-28 修复 Context 生命周期导致无法 Fixed 的致命 Bug；引入 JNA 享元模式彻底消除 GC 瓶颈
+ *  */
 @Service
 public class MixedLogSplitter {
+
+    @Autowired
+    private GgaParser ggaParser;
 
     private static final Logger logger = LoggerFactory.getLogger(MixedLogSplitter.class);
 
@@ -62,9 +54,7 @@ public class MixedLogSplitter {
     private static final byte NMEA_START = '$';
     private static final byte RTCM3_PREAMBLE = (byte) 0xD3;
 
-    private static final long ZDA_DATE_MAX_AGE_MS = 60 * 1000L;
-
-    // 【新增】RTCM3 CRC24Q 查找表，用于快速校验伪造帧
+    // RTCM3 CRC24Q 查找表，用于快速校验伪造帧
     private static final int[] CRC24Q_TABLE = new int[256];
     static {
         for (int i = 0; i < 256; i++) {
@@ -77,47 +67,35 @@ public class MixedLogSplitter {
         }
     }
 
-    // ==================== 【新增】NMEA 入库白名单 ====================
+    // ==================== NMEA 入库白名单 ====================
 
-    /**
-     * NMEA 语句入库白名单
-     * 只有在此白名单中的 NMEA 语句类型才会被写入 st_nmea_raw 表
-     *
-     * 当前支持的入库类型：
-     * - GGA: 定位数据（$GNGGA, $GPGGA, $BDGGA）
-     * - GSV: 卫星可见数据（$GPGSV, $GBGSV, $GLGSV, $GAGSV, $BDGSV, $QZGSV, $IGSV, $GNGSV）
-     * - ZDA: 时间日期数据（$GNZDA, $GPZDA, $BDZDA）
-     *
-     * 不入库的类型（示例）：
-     * - VTG: 航向速度数据
-     * - RMC: 推荐最小定位数据
-     * - GSA: DOP和卫星信息
-     * - 其他 NMEA 语句
-     */
     private static final Set<String> NMEA_STORAGE_WHITELIST = new HashSet<>();
-
     static {
-        // GGA 系列 - 定位数据
-        NMEA_STORAGE_WHITELIST.add("$GNGGA");  // 多系统混合
-        NMEA_STORAGE_WHITELIST.add("$GPGGA");  // GPS
-        NMEA_STORAGE_WHITELIST.add("$BDGGA");  // 北斗
-        NMEA_STORAGE_WHITELIST.add("$GLGGA");  // GLONASS
-        NMEA_STORAGE_WHITELIST.add("$GAGGA");  // Galileo
+        NMEA_STORAGE_WHITELIST.add("GGA");
+        NMEA_STORAGE_WHITELIST.add("GSV");
+        NMEA_STORAGE_WHITELIST.add("ZDA");
+    }
 
-        // GSV 系列 - 卫星可见数据
-        NMEA_STORAGE_WHITELIST.add("$GPGSV");  // GPS
-        NMEA_STORAGE_WHITELIST.add("$GBGSV");  // 北斗
-        NMEA_STORAGE_WHITELIST.add("$BDGSV");  // 北斗（备选）
-        NMEA_STORAGE_WHITELIST.add("$GLGSV");  // GLONASS
-        NMEA_STORAGE_WHITELIST.add("$GAGSV");  // Galileo
-        NMEA_STORAGE_WHITELIST.add("$QZGSV");  // QZSS
-        NMEA_STORAGE_WHITELIST.add("$IGSV");   // IRNSS
-        NMEA_STORAGE_WHITELIST.add("$GNGSV");  // 多系统混合
+    private static final Set<String> NMEA_STORAGE_WHITELIST_FULL = new HashSet<>();
+    static {
+        NMEA_STORAGE_WHITELIST_FULL.add("$GNGGA");
+        NMEA_STORAGE_WHITELIST_FULL.add("$GPGGA");
+        NMEA_STORAGE_WHITELIST_FULL.add("$BDGGA");
+        NMEA_STORAGE_WHITELIST_FULL.add("$GLGGA");
+        NMEA_STORAGE_WHITELIST_FULL.add("$GAGGA");
 
-        // ZDA 系列 - 时间日期数据
-        NMEA_STORAGE_WHITELIST.add("$GNZDA");  // 多系统混合
-        NMEA_STORAGE_WHITELIST.add("$GPZDA");  // GPS
-        NMEA_STORAGE_WHITELIST.add("$BDZDA");  // 北斗
+        NMEA_STORAGE_WHITELIST_FULL.add("$GPGSV");
+        NMEA_STORAGE_WHITELIST_FULL.add("$GBGSV");
+        NMEA_STORAGE_WHITELIST_FULL.add("$BDGSV");
+        NMEA_STORAGE_WHITELIST_FULL.add("$GLGSV");
+        NMEA_STORAGE_WHITELIST_FULL.add("$GAGSV");
+        NMEA_STORAGE_WHITELIST_FULL.add("$QZGSV");
+        NMEA_STORAGE_WHITELIST_FULL.add("$IGSV");
+        NMEA_STORAGE_WHITELIST_FULL.add("$GNGSV");
+
+        NMEA_STORAGE_WHITELIST_FULL.add("$GNZDA");
+        NMEA_STORAGE_WHITELIST_FULL.add("$GPZDA");
+        NMEA_STORAGE_WHITELIST_FULL.add("$BDZDA");
     }
 
     // ==================== 依赖注入 ====================
@@ -153,15 +131,13 @@ public class MixedLogSplitter {
     private final AtomicLong zdaCount = new AtomicLong(0);
     private final AtomicLong globalBufferOverflowCount = new AtomicLong(0);
 
-    // 【新增】入库统计
+    // 入库统计
     private final AtomicLong nmeaStorageCount = new AtomicLong(0);
     private final AtomicLong nmeaFilteredCount = new AtomicLong(0);
 
     @PostConstruct
     public void init() {
         logger.info("MixedLogSplitter 初始化完成，默认站点: {}", defaultStationId);
-        logger.info("NMEA 入库白名单已加载，共 {} 种语句类型: {}",
-                NMEA_STORAGE_WHITELIST.size(), NMEA_STORAGE_WHITELIST);
         getOrCreateStationState(defaultStationId);
     }
 
@@ -193,31 +169,18 @@ public class MixedLogSplitter {
         return (state != null) ? state.cachedZdaDate : null;
     }
 
-    /**
-     * 【新增】判断 NMEA 语句是否在入库白名单中
-     *
-     * @param nmea NMEA 语句
-     * @return true 表示需要入库
-     */
-    public boolean shouldStoreNmea(String nmea) {
-        if (nmea == null || nmea.isEmpty()) {
-            return false;
+    private boolean shouldStoreNmeaFast(String nmea) {
+        if (nmea.length() < 6 || nmea.charAt(0) != '$') return false;
+        char c1 = nmea.charAt(3);
+        char c2 = nmea.charAt(4);
+        char c3 = nmea.charAt(5);
+
+        if (c1 == 'G') {
+            return (c2 == 'G' && c3 == 'A') || (c2 == 'S' && c3 == 'V');
         }
-        String trimmed = nmea.trim();
-        // 检查是否以白名单中的任一前缀开头
-        for (String prefix : NMEA_STORAGE_WHITELIST) {
-            if (trimmed.startsWith(prefix)) {
-                return true;
-            }
-        }
-        return false;
+        return c1 == 'Z' && c2 == 'D' && c3 == 'A';
     }
 
-    /**
-     * 【新增】获取 NMEA 入库白名单（只读）
-     *
-     * @return 白名单集合的副本
-     */
     public Set<String> getNmeaStorageWhitelist() {
         return new HashSet<>(NMEA_STORAGE_WHITELIST);
     }
@@ -240,7 +203,6 @@ public class MixedLogSplitter {
                 newBuffer.put(buffer);
                 state.buffer = newBuffer;
                 buffer = newBuffer;
-                logger.debug("站点 {} 缓冲区扩容到 {} 字节", state.stationId, newCapacity);
             } else {
                 buffer.clear();
                 globalBufferOverflowCount.incrementAndGet();
@@ -258,7 +220,7 @@ public class MixedLogSplitter {
             if (firstByte == NMEA_START) {
                 int endIdx = findNmeaEnd(buffer);
                 if (endIdx < 0) {
-                    buffer.position(pos); // 恢复位置，等待更多数据
+                    buffer.position(pos);
                     buffer.compact();
                     return;
                 }
@@ -279,14 +241,13 @@ public class MixedLogSplitter {
                     return;
                 }
 
-                int totalLen = 3 + frameLen + 3; // 前导(1) + 长度(2) + 数据(frameLen) + CRC(3)
+                int totalLen = 3 + frameLen + 3;
                 if (buffer.remaining() < totalLen) {
                     buffer.position(pos);
                     buffer.compact();
                     return;
                 }
 
-                // 【BUG 修复 3】：校验 CRC24Q。如果校验失败，说明碰巧遇到了 0xD3 伪造头部，需要跳过这 1 个字节继续寻找
                 if (!validateRtcmCrc(buffer, pos, frameLen)) {
                     buffer.position(pos + 1);
                     continue;
@@ -299,98 +260,36 @@ public class MixedLogSplitter {
                 rtcmCount.incrementAndGet();
 
             } else {
-                buffer.get(); // 未知数据，前进 1 字节
+                buffer.get();
             }
         }
 
         buffer.clear();
     }
 
-    /**
-     * 处理 NMEA 语句
-     *
-     * 修改说明：
-     * 1. 先执行业务逻辑处理（ZDA/GSV/GGA）
-     * 2. 然后根据白名单判断是否需要入库
-     * 3. 白名单内的语句调用 asyncProcessor.submitNmea() 入库
-     * 4. 白名单外的语句不入库，但记录过滤统计
-     *
-     * @param state 站点状态
-     * @param nmea NMEA 语句
-     */
     private void processNmea(StationState state, String nmea) {
         if (nmea == null || nmea.isEmpty()) return;
         String trimmed = nmea.trim();
 
-        // ==================== 业务逻辑处理 ====================
-
-        /*
-         * 【$GNZDA / $GPZDA / $BDZDA】
-         * 含义：时间与日期数据。
-         * 作用：为整个系统提供绝对的 UTC 日期基准 (解决跨天边界问题)。
-         */
         if (zdaParser.isZdaSentence(trimmed)) {
             processZda(state, trimmed);
-            // 【修复】不再直接 return，继续判断是否入库
-        }
-
-        /*
-         * 【$GPGSV / $GBGSV / $GLGSV / $GNGSV】
-         * 含义：可视卫星天空视图 (Satellites in View)。
-         * 作用：提供当前天上卫星的宏观状态，提取关键要素：仰角(Elevation)、方位角(Azimuth)、信噪比(SNR)。
-         * 特点：一条语句最多装 4 颗卫星，不含高精度伪距，天生 SNR 为整数。
-         */
-        else if (gsvParser.isGsvSentence(trimmed)) {
+        } else if (gsvParser.isGsvSentence(trimmed)) {
             processGsv(state, trimmed);
-            // 【修复】不再直接 return，继续判断是否入库
-        }
-
-        /*
-         * 【$GNGGA / $GPGGA / $BDGGA】
-         * 含义：GNSS 3D 定位数据 (Fix Data)。
-         * 作用：提供接收机当前的最核心定位解算结果，包括：经纬度、海拔高程、定位状态(单点/差分/RTK固定/浮点)。
-         */
-        else if (isGgaSentence(trimmed)) {
-            processGga(state, trimmed);
-        }
-
-        // ==================== 入库白名单过滤 ====================
-
-        if (asyncProcessor != null) {
-            if (shouldStoreNmea(trimmed)) {
-                // 白名单内的语句，执行入库
-                asyncProcessor.submitNmea(state.stationId, trimmed);
-                nmeaStorageCount.incrementAndGet();
-
-                if (logger.isDebugEnabled()) {
-                    logger.debug("NMEA入库: {} -> {}", state.stationId, truncateForLog(trimmed));
-                }
-            } else {
-                // 白名单外的语句，不入库，记录过滤统计
-                nmeaFilteredCount.incrementAndGet();
-
-                if (logger.isTraceEnabled()) {
-                    logger.trace("NMEA过滤(不入库): {} -> {}", state.stationId, truncateForLog(trimmed));
-                }
+        } else if (ggaParser.isGgaSentence(trimmed)) {
+            GnssSolution solution = ggaParser.parse(trimmed);
+            if (solution != null && asyncProcessor != null) {
+                asyncProcessor.submitGnssSolution(solution);
             }
         }
-    }
 
-    /**
-     * 判断是否为 GGA 语句
-     *
-     * @param nmea NMEA 语句
-     * @return true 表示是 GGA 语句
-     */
-    private boolean isGgaSentence(String nmea) {
-        if (nmea == null || nmea.isEmpty()) {
-            return false;
+        if (asyncProcessor != null) {
+            if (shouldStoreNmeaFast(trimmed)) {
+                asyncProcessor.submitNmea(state.stationId, trimmed);
+                nmeaStorageCount.incrementAndGet();
+            } else {
+                nmeaFilteredCount.incrementAndGet();
+            }
         }
-        return nmea.startsWith("$GPGGA") ||
-                nmea.startsWith("$GNGGA") ||
-                nmea.startsWith("$BDGGA") ||
-                nmea.startsWith("$GLGGA") ||
-                nmea.startsWith("$GAGGA");
     }
 
     private void processZda(StationState state, String nmea) {
@@ -418,7 +317,6 @@ public class MixedLogSplitter {
         LocalDate obsDate = state.cachedZdaDate != null ? state.cachedZdaDate : LocalDate.now();
         String dateSource = state.cachedZdaDate != null ? state.dateSource : "SYSTEM";
 
-        // 注意：这里传入的 currentEpochTime 是被 RTCM 解析器更新过的真实时间
         if (fusionService != null) {
             fusionService.processGsvData(state.stationId, satellites, state.currentEpochTime, obsDate, dateSource);
         }
@@ -432,20 +330,11 @@ public class MixedLogSplitter {
         if (ctx == null) return;
 
         try {
-            /*
-             * 【RTCM 格式数据】(Radio Technical Commission for Maritime Services)
-             * 含义：高精度 GNSS 差分/原始观测值二进制传输协议 (如 MSM4/MSM7 报文)。
-             * 作用：这是电离层研究和 RTK 解算必需的最底层科学数据。
-             * 产出：通过底层 DLL (RTKLIB) 解码后，能获取极其精确的：
-             * 1. 伪距 (Pseudorange P1/P2)
-             * 2. 载波相位 (Carrier Phase L1/L2)
-             * 3. 高精度双频信噪比 (SNR)
-             */
-            RtklibNative.JavaObs[] obs = parseRtcmWithNative(ctx, rtcmData);
+            // 【核心修复2】：传入 state，复用底层 JNA 结构体缓存，消除 GC 性能瓶颈
+            RtklibNative.JavaObs[] obs = parseRtcmWithNative(ctx, rtcmData, state);
             if (obs != null && obs.length > 0) {
-
                 long realGnssEpochTime = extractEpochTimeFromObs(obs[0]);
-                state.currentEpochTime = realGnssEpochTime; // 更新站点的全局历元基准
+                state.currentEpochTime = realGnssEpochTime;
 
                 LocalDate obsDate = state.cachedZdaDate != null ? state.cachedZdaDate : LocalDate.now();
                 String dateSource = state.cachedZdaDate != null ? state.dateSource : "SYSTEM";
@@ -454,34 +343,23 @@ public class MixedLogSplitter {
                     fusionService.processRtcmData(state.stationId, obs, realGnssEpochTime, obsDate, dateSource);
                 }
             }
-        }catch (Throwable t) {
+        } catch (Throwable t) {
             logger.error("站点 {} RTCM解析(Native)发生致命异常: {}", state.stationId, t.getMessage());
         }
+        // 🚨🚨🚨 【核心修复1】：彻底删除 finally 中的 releaseContext，保证 RTKLIB 卡尔曼滤波状态机跨历元存活！🚨🚨🚨
 
         if (asyncProcessor != null) {
             asyncProcessor.submitRtcm(state.stationId, rtcmData);
         }
     }
 
-    private void processGga(StationState state, String nmea) {
-        GnssSolution solution = parseGga(nmea);
-        if (solution != null && asyncProcessor != null) {
-            asyncProcessor.submitGnssSolution(solution);
-        }
-    }
-
     // ==================== 辅助方法 ====================
 
-    /**
-     * 【BUG 修复 1 辅助方法】：提取真实历元时间。
-     * 你需要根据你实际定义的 JavaObs 内部结构映射关系，来返回对应的毫秒级时间戳。
-     */
     private long extractEpochTimeFromObs(RtklibNative.JavaObs obs) {
-        // TODO: 替换为实际的字段。例如 RTKLIB 的 gtime_t 中包含 time (秒) 和 sec (小数秒)
-        // 示例： return obs.time * 1000L + (long)(obs.sec * 1000);
-
-        // 若当前未完善 Native 结构映射，暂用备用逻辑（不推荐）：
-        return System.currentTimeMillis();
+        if (obs.time != 0) {
+            return obs.time * 1000L + Math.round(obs.sec * 1000.0);
+        }
+        throw new IllegalStateException("无法从RTCM观测值提取高精度GNSS历元时间");
     }
 
     private StationState getOrCreateStationState(String stationId) {
@@ -492,26 +370,21 @@ public class MixedLogSplitter {
             state.lock = new ReentrantLock();
             state.currentEpochTime = System.currentTimeMillis();
             state.dateSource = "NONE";
+
+            // 【核心修复2】：在状态初始化时，分配唯一的 JNA 缓存对象，避免高频 GC
+            state.cachedObsRef = new RtklibNative.JavaObs.ByReference();
+            state.cachedObsArray = (RtklibNative.JavaObs[]) state.cachedObsRef.toArray(this.maxObs);
+
             return state;
         });
     }
 
-    /**
-     * 【BUG 修复 2】：修复由于判断条件限制导致的漏 '\n' 和越界问题
-     */
     private int findNmeaEnd(ByteBuffer buffer) {
         int pos = buffer.position();
         int limit = buffer.limit();
-
         for (int i = pos; i < limit; i++) {
-            // 兼容只有 \n 结尾的情况
-            if (buffer.get(i) == '\n') {
-                return i;
-            }
-            // 兼容 \r\n 结尾的情况
-            if (i < limit - 1 && buffer.get(i) == '\r' && buffer.get(i + 1) == '\n') {
-                return i + 1;
-            }
+            if (buffer.get(i) == '\n') return i;
+            if (i < limit - 1 && buffer.get(i) == '\r' && buffer.get(i + 1) == '\n') return i + 1;
         }
         return -1;
     }
@@ -523,76 +396,37 @@ public class MixedLogSplitter {
         return ((buffer.get(pos + 1) & 0x03) << 8) | (buffer.get(pos + 2) & 0xFF);
     }
 
-    /**
-     * 【BUG 修复 3 辅助方法】：校验 RTCM3 报文的 CRC24Q
-     */
     private boolean validateRtcmCrc(ByteBuffer buffer, int pos, int frameLen) {
         int crc = 0;
-        int dataLen = 3 + frameLen; // 前导 + 长度 + payload
-
-        // 计算前段数据的 CRC
+        int dataLen = 3 + frameLen;
         for (int i = 0; i < dataLen; i++) {
             crc = ((crc << 8) & 0xFFFFFF) ^ CRC24Q_TABLE[(crc >>> 16) ^ (buffer.get(pos + i) & 0xFF)];
         }
-
-        // 读取报文尾部的 3 字节期望 CRC
         int expectedCrc = ((buffer.get(pos + dataLen) & 0xFF) << 16) |
                 ((buffer.get(pos + dataLen + 1) & 0xFF) << 8) |
                 (buffer.get(pos + dataLen + 2) & 0xFF);
-
         return crc == expectedCrc;
     }
 
-    private RtklibNative.JavaObs[] parseRtcmWithNative(Pointer ctx, byte[] rtcmData) {
-
-        RtklibNative.JavaObs.ByReference obsRef = new RtklibNative.JavaObs.ByReference();
-        RtklibNative.JavaObs[] obsArray = (RtklibNative.JavaObs[]) obsRef.toArray(this.maxObs);
+    /**
+     * 引入享元模式（复用 state 中的 cached 结构体）
+     */
+    private RtklibNative.JavaObs[] parseRtcmWithNative(Pointer ctx, byte[] rtcmData, StationState state) {
+        // 直接使用绑定的预分配对象，拒绝 new 对象！
+        RtklibNative.JavaObs.ByReference obsRef = state.cachedObsRef;
+        RtklibNative.JavaObs[] obsArray = state.cachedObsArray;
 
         int count = RtklibNative.INSTANCE.rtklib_parse_rtcm_frame_ex(ctx, rtcmData, rtcmData.length, obsRef, this.maxObs);
         if (count <= 0) return null;
 
         RtklibNative.JavaObs[] result = new RtklibNative.JavaObs[count];
         for (int i = 0; i < count; i++) {
+            obsArray[i].read(); // 将 Native 内存同步映射到现存的 Java 对象上
             result[i] = obsArray[i];
-            result[i].read();
         }
         return result;
     }
 
-    private GnssSolution parseGga(String nmea) {
-        try {
-            String[] fields = nmea.split(",");
-            if (fields.length < 10) return null;
-            double lat = parseNmeaCoord(fields[2], fields[3]);
-            double lon = parseNmeaCoord(fields[4], fields[5]);
-            int status = Integer.parseInt(fields[6].trim());
-            int sats = Integer.parseInt(fields[7].trim());
-            double hdop = Double.parseDouble(fields[8].trim());
-            double alt = Double.parseDouble(fields[9].trim());
-            return new GnssSolution(new Date(), lat, lon, alt, status, sats).setHdop(hdop);
-        } catch (Exception e) {
-            return null;
-        }
-    }
-
-    private double parseNmeaCoord(String value, String dir) {
-        if (value == null || value.isEmpty()) return 0;
-        try {
-            int dot = value.indexOf('.');
-            int degLen = dot - 2;
-            double deg = Double.parseDouble(value.substring(0, degLen));
-            double min = Double.parseDouble(value.substring(degLen));
-            double coord = deg + min / 60.0;
-            if ("S".equals(dir) || "W".equals(dir)) coord = -coord;
-            return coord;
-        } catch (Exception e) {
-            return 0;
-        }
-    }
-
-    /**
-     * 截断字符串用于日志输出
-     */
     private String truncateForLog(String s) {
         if (s == null) return "null";
         return s.length() > 80 ? s.substring(0, 80) + "..." : s;
@@ -600,9 +434,6 @@ public class MixedLogSplitter {
 
     // ==================== 统计方法 ====================
 
-    /**
-     * 获取 NMEA 处理统计信息
-     */
     public String getStatistics() {
         return String.format(
                 "NMEA统计: 总接收=%d, 入库=%d, 过滤=%d, GSV=%d, ZDA=%d, RTCM=%d, 缓冲溢出=%d",
@@ -611,23 +442,9 @@ public class MixedLogSplitter {
         );
     }
 
-    /**
-     * 获取入库数量
-     */
-    public long getNmeaStorageCount() {
-        return nmeaStorageCount.get();
-    }
+    public long getNmeaStorageCount() { return nmeaStorageCount.get(); }
+    public long getNmeaFilteredCount() { return nmeaFilteredCount.get(); }
 
-    /**
-     * 获取过滤数量
-     */
-    public long getNmeaFilteredCount() {
-        return nmeaFilteredCount.get();
-    }
-
-    /**
-     * 重置统计信息
-     */
     public void resetStatistics() {
         nmeaCount.set(0);
         nmeaStorageCount.set(0);
@@ -650,5 +467,8 @@ public class MixedLogSplitter {
         long lastZdaTimestamp;
         long zdaReceivedCount;
         String dateSource;
+
+        RtklibNative.JavaObs.ByReference cachedObsRef;
+        RtklibNative.JavaObs[] cachedObsArray;
     }
 }

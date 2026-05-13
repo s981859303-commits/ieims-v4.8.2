@@ -1,4 +1,4 @@
-package com.ruoyi.gnss.service;
+package com.ruoyi.ieims.gnss.service;
 
 import java.time.Instant;
 

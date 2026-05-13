@@ -1,10 +1,12 @@
-package com.ruoyi.gnss.service.impl;
+package com.ruoyi.ieims.gnss.service.impl;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import com.ruoyi.gnss.domain.GsvSatelliteData;
-import com.ruoyi.gnss.domain.SatObservation;
-import com.ruoyi.gnss.service.*;
+import com.ruoyi.ieims.gnss.service.GnssAsyncProcessor;
+import com.ruoyi.ieims.gnss.domain.GsvSatelliteData;
+import com.ruoyi.ieims.gnss.domain.SatObservation;
+import com.ruoyi.ieims.gnss.service.RtklibNative;
+import com.ruoyi.ieims.gnss.service.SatNoConverter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -66,8 +68,6 @@ public class SatelliteDataFusionService {
     @Autowired(required = false)
     private GnssAsyncProcessor asyncProcessor;
 
-    @Autowired(required = false)
-    private ISatObservationStorageService storageService;
 
     // ==================== 缓存定义 ====================
 
@@ -175,28 +175,16 @@ public class SatelliteDataFusionService {
             return;
         }
 
-        String satId = null;
-        if (obs.id != null) {
-            int len = 0;
-            for (int i = 0; i < obs.id.length && obs.id[i] != 0; i++) {
-                len++;
-            }
-            if (len > 0) {
-                satId = new String(obs.id, 0, len, StandardCharsets.UTF_8).trim();
-            }
-        }
+        String satNo = SatNoConverter.fromRtcmSatIdBytes(obs.id);
 
-        // 【修复】使用 SatNoConverter 转换卫星编号
-        String satNo;
-        if (satId != null && !satId.isEmpty()) {
-            satNo = SatNoConverter.fromRtcmSatId(satId, rtcmMessageType);
-        } else {
-            // 如果没有卫星ID，使用 sat 字段和消息类型
+        // 如果 id 解析失败 (理论上不会发生，因为 C 必定写入了 ID)，
+        // fallback 使用刚刚被修复对齐问题的 obs.sat 取值！
+        if (satNo == null) {
             satNo = SatNoConverter.fromRtcmMessageType(rtcmMessageType, obs.sat);
         }
 
         if (satNo == null) {
-            logger.warn("无法解析卫星编号: satId={}, sat={}, msgType={}", satId, obs.sat, rtcmMessageType);
+            logger.warn("无法解析卫星编号: sat={}", obs.sat);
             return;
         }
 
@@ -229,7 +217,7 @@ public class SatelliteDataFusionService {
                 len1++;
             }
             if (len1 > 0) {
-                rtcmData.code1 = new String(obs.code, 0, len1, StandardCharsets.UTF_8).trim();
+                rtcmData.code1 = resolveSignalCode(obs.code, 0, len1);
             }
 
             // code[8-15] 是第二个频点的代码
@@ -271,6 +259,20 @@ public class SatelliteDataFusionService {
                 cacheRtcmData(stationId, obsArray[i], rtcmMessageType);
             }
         }
+    }
+
+    // 【优化说明】：频点代码（如 "C1C", "C2W"）种类极其有限且固定。
+    // 引入一个全局 ConcurrentHashMap<Integer, String> 作为享元模式池，避免每秒数千次的 String 创建。
+    private static final ConcurrentHashMap<Integer, String> CODE_POOL = new ConcurrentHashMap<>();
+
+    private String resolveSignalCode(byte[] codeBytes, int offset, int len) {
+        // 自定义字节切片哈希计算，彻底消除 new byte[] 带来的 GC
+        int hash = 1;
+        for (int i = offset; i < offset + len; i++) {
+            hash = 31 * hash + codeBytes[i];
+        }
+        return CODE_POOL.computeIfAbsent(hash,
+                k -> new String(codeBytes, offset, len, StandardCharsets.UTF_8).trim());
     }
 
     // ==================== ZDA 日期处理 ====================
@@ -432,19 +434,35 @@ public class SatelliteDataFusionService {
             return;
         }
 
+        // 【优化1】：提前决定本次的最终历元时间
+        long finalEpochTime = 0L;
+        if (epochTime > 0) {
+            finalEpochTime = epochTime;
+        } else if (gsv != null && gsv.getEpochTime() != null) {
+            finalEpochTime = gsv.getEpochTime();
+        } else if (rtcm != null) {
+            finalEpochTime = rtcm.epochTime;
+        }
+
+        // =========================================================
+        // 【核心优化拦截】：拒绝无时间的纯 RTCM 缓冲态！
+        // 如果当前是一条没有 GSV 几何信息的纯 RTCM 记录，并且它的历元时间为 0，
+        // 说明这仅仅是底层解析时的一个临时缓冲触发。我们直接 return 丢弃，
+        // 稍后拿到精确历元时间再次触发时再让它生成最终记录。
+        // =========================================================
+        if (gsv == null && finalEpochTime == 0L) {
+            return;
+        }
+
         // 创建观测数据
         SatObservation obs = new SatObservation();
         obs.setStationId(stationId);
         obs.setSatNo(satNo);
         obs.setTimestamp(System.currentTimeMillis());
 
-        // 设置历元时间
-        if (epochTime > 0) {
-            obs.setEpochTime(epochTime);
-        } else if (gsv != null && gsv.getEpochTime() != null) {
-            obs.setEpochTime(gsv.getEpochTime());
-        } else if (rtcm != null) {
-            obs.setEpochTime(rtcm.epochTime);
+        // 赋值历元时间
+        if (finalEpochTime > 0) {
+            obs.setEpochTime(finalEpochTime);
         }
 
         /*
@@ -477,11 +495,17 @@ public class SatelliteDataFusionService {
                 obs.setSatSystem(rtcm.satSystem);
             }
 
-            // 【核心修复】只要 RTCM 有高精度 SNR（且大于 0），就强行覆盖 GSV 的粗糙整数 SNR
+            // RTCM 有高精度 SNR（且大于 0），就强行覆盖 GSV 的粗糙整数 SNR
             if (rtcm.snr1 != null && rtcm.snr1 > 0) {
                 obs.setSnr(rtcm.snr1);
             }
+
+            if (rtcm.snr2 != null && rtcm.snr2 > 0) {
+                obs.setSnr2(rtcm.snr2);
+            }
         }
+
+
 
         // 设置数据来源
         if (gsv != null && rtcm != null) {
@@ -510,7 +534,7 @@ public class SatelliteDataFusionService {
      * 添加到待入库队列
      */
     private void addToPending(String stationId, SatObservation obs) {
-        pendingObservations.computeIfAbsent(stationId, k -> new CopyOnWriteArrayList<>()).add(obs);
+        pendingObservations.computeIfAbsent(stationId, k -> java.util.Collections.synchronizedList(new java.util.ArrayList<>())).add(obs);
 
         // 检查是否需要刷新
         int pendingCount = getPendingObservationsCount();
@@ -524,20 +548,22 @@ public class SatelliteDataFusionService {
     /**
      * 刷新待入库数据
      *
-     * 【修复说明】
-     * - BUG-14: 修复了方法名错误 submitSatObservation -> submitSatObservations
      */
     public synchronized void flushPending() {
         if (pendingObservations.isEmpty()) {
             return;
         }
 
-        // 取出所有待入库数据
         Map<String, List<SatObservation>> toFlush = new HashMap<>();
+
+        // 取出所有待入库数据
         for (Map.Entry<String, List<SatObservation>> entry : pendingObservations.entrySet()) {
-            if (!entry.getValue().isEmpty()) {
-                toFlush.put(entry.getKey(), new ArrayList<>(entry.getValue()));
-                entry.getValue().clear();
+            String stationId = entry.getKey();
+            // 将旧的 List 直接移除弹出（如果稍后又有新数据，computeIfAbsent 会重新创建）
+            List<SatObservation> snapshot = pendingObservations.remove(stationId);
+
+            if (snapshot != null && !snapshot.isEmpty()) {
+                toFlush.put(stationId, snapshot);
             }
         }
 
@@ -557,8 +583,6 @@ public class SatelliteDataFusionService {
                 if (asyncProcessor != null) {
                     // 【修复】方法名改为 submitSatObservations
                     asyncProcessor.submitSatObservations(stationId, uniqueList);
-                } else if (storageService != null) {
-                    storageService.saveSatObservationBatch(stationId, uniqueList);
                 }
                 logger.debug("刷新待入库数据: stationId={}, count={}", stationId, uniqueList.size());
             }
@@ -601,9 +625,6 @@ public class SatelliteDataFusionService {
         for (Map.Entry<String, List<SatObservation>> entry : byStation.entrySet()) {
             if (asyncProcessor != null) {
                 asyncProcessor.submitSatObservations(entry.getKey(), entry.getValue());
-            } else if (storageService != null) {
-                // 直接存储
-                storageService.saveSatObservationBatch(entry.getKey(), entry.getValue());
             }
         }
 

@@ -1,4 +1,4 @@
-package com.ruoyi.gnss.domain;
+package com.ruoyi.ieims.gnss.domain;
 
 import java.util.Date;
 

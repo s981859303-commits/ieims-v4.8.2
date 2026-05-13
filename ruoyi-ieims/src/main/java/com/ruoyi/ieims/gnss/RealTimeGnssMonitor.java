@@ -1,6 +1,6 @@
-package com.ruoyi.gnss;
+package com.ruoyi.ieims.gnss;
 
-import com.ruoyi.gnss.service.RtklibNative;
+import com.ruoyi.ieims.gnss.service.RtklibNative;
 import com.sun.jna.Pointer;
 import org.eclipse.paho.client.mqttv3.*;
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
