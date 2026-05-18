@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.ieims.ieimsgnssstation.mapper.IeimsGnssStationMapper">
+    
+    <resultMap type="IeimsGnssStation" id="IeimsGnssStationResult">
+        <result property="id"    column="id"    />
+        <result property="stationId"    column="station_id"    />
+        <result property="stationName"    column="station_name"    />
+        <result property="longitude"    column="longitude"    />
+        <result property="latitude"    column="latitude"    />
+        <result property="altitude"    column="altitude"    />
+        <result property="logo"    column="logo"    />
+        <result property="deptId"    column="dept_id"    />
+        <result property="manager"    column="manager"    />
+        <result property="contact"    column="contact"    />
+        <result property="phone"    column="phone"    />
+        <result property="enableFlag"    column="enable_flag"    />
+        <result property="onlineStatus"    column="online_status"    />
+        <result property="lastOnlineTime"    column="last_online_time"    />
+        <result property="remark"    column="remark"    />
+        <result property="createBy"    column="create_by"    />
+        <result property="createTime"    column="create_time"    />
+        <result property="updateBy"    column="update_by"    />
+        <result property="updateTime"    column="update_time"    />
+        <result property="delFlag"    column="del_flag"    />
+    </resultMap>
+
+    <sql id="selectIeimsGnssStationVo">
+        select id, station_id, station_name, longitude, latitude, altitude, logo, dept_id, manager, contact, phone, enable_flag, online_status, last_online_time, remark, create_by, create_time, update_by, update_time, del_flag from ieims_gnss_station
+    </sql>
+
+    <select id="selectIeimsGnssStationList" parameterType="IeimsGnssStation" resultMap="IeimsGnssStationResult">
+        <include refid="selectIeimsGnssStationVo"/>
+        <where>  
+            <if test="stationId != null  and stationId != ''"> and station_id = #{stationId}</if>
+            <if test="stationName != null  and stationName != ''"> and station_name like concat('%', #{stationName}, '%')</if>
+            <if test="longitude != null "> and longitude = #{longitude}</if>
+            <if test="latitude != null "> and latitude = #{latitude}</if>
+            <if test="altitude != null "> and altitude = #{altitude}</if>
+            <if test="logo != null  and logo != ''"> and logo = #{logo}</if>
+            <if test="deptId != null "> and dept_id = #{deptId}</if>
+            <if test="manager != null  and manager != ''"> and manager = #{manager}</if>
+            <if test="contact != null  and contact != ''"> and contact = #{contact}</if>
+            <if test="phone != null  and phone != ''"> and phone = #{phone}</if>
+            <if test="enableFlag != null  and enableFlag != ''"> and enable_flag = #{enableFlag}</if>
+            <if test="onlineStatus != null  and onlineStatus != ''"> and online_status = #{onlineStatus}</if>
+            <if test="lastOnlineTime != null "> and last_online_time = #{lastOnlineTime}</if>
+        </where>
+    </select>
+    
+    <select id="selectIeimsGnssStationById" parameterType="Long" resultMap="IeimsGnssStationResult">
+        <include refid="selectIeimsGnssStationVo"/>
+        where id = #{id}
+    </select>
+
+    <insert id="insertIeimsGnssStation" parameterType="IeimsGnssStation" useGeneratedKeys="true" keyProperty="id">
+        insert into ieims_gnss_station
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="stationId != null and stationId != ''">station_id,</if>
+            <if test="stationName != null and stationName != ''">station_name,</if>
+            <if test="longitude != null">longitude,</if>
+            <if test="latitude != null">latitude,</if>
+            <if test="altitude != null">altitude,</if>
+            <if test="logo != null">logo,</if>
+            <if test="deptId != null">dept_id,</if>
+            <if test="manager != null">manager,</if>
+            <if test="contact != null">contact,</if>
+            <if test="phone != null">phone,</if>
+            <if test="enableFlag != null">enable_flag,</if>
+            <if test="onlineStatus != null">online_status,</if>
+            <if test="lastOnlineTime != null">last_online_time,</if>
+            <if test="remark != null">remark,</if>
+            <if test="createBy != null">create_by,</if>
+            <if test="createTime != null">create_time,</if>
+            <if test="updateBy != null">update_by,</if>
+            <if test="updateTime != null">update_time,</if>
+            <if test="delFlag != null">del_flag,</if>
+         </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="stationId != null and stationId != ''">#{stationId},</if>
+            <if test="stationName != null and stationName != ''">#{stationName},</if>
+            <if test="longitude != null">#{longitude},</if>
+            <if test="latitude != null">#{latitude},</if>
+            <if test="altitude != null">#{altitude},</if>
+            <if test="logo != null">#{logo},</if>
+            <if test="deptId != null">#{deptId},</if>
+            <if test="manager != null">#{manager},</if>
+            <if test="contact != null">#{contact},</if>
+            <if test="phone != null">#{phone},</if>
+            <if test="enableFlag != null">#{enableFlag},</if>
+            <if test="onlineStatus != null">#{onlineStatus},</if>
+            <if test="lastOnlineTime != null">#{lastOnlineTime},</if>
+            <if test="remark != null">#{remark},</if>
+            <if test="createBy != null">#{createBy},</if>
+            <if test="createTime != null">#{createTime},</if>
+            <if test="updateBy != null">#{updateBy},</if>
+            <if test="updateTime != null">#{updateTime},</if>
+            <if test="delFlag != null">#{delFlag},</if>
+         </trim>
+    </insert>
+
+    <update id="updateIeimsGnssStation" parameterType="IeimsGnssStation">
+        update ieims_gnss_station
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="stationId != null and stationId != ''">station_id = #{stationId},</if>
+            <if test="stationName != null and stationName != ''">station_name = #{stationName},</if>
+            <if test="longitude != null">longitude = #{longitude},</if>
+            <if test="latitude != null">latitude = #{latitude},</if>
+            <if test="altitude != null">altitude = #{altitude},</if>
+            <if test="logo != null">logo = #{logo},</if>
+            <if test="deptId != null">dept_id = #{deptId},</if>
+            <if test="manager != null">manager = #{manager},</if>
+            <if test="contact != null">contact = #{contact},</if>
+            <if test="phone != null">phone = #{phone},</if>
+            <if test="enableFlag != null">enable_flag = #{enableFlag},</if>
+            <if test="onlineStatus != null">online_status = #{onlineStatus},</if>
+            <if test="lastOnlineTime != null">last_online_time = #{lastOnlineTime},</if>
+            <if test="remark != null">remark = #{remark},</if>
+            <if test="createBy != null">create_by = #{createBy},</if>
+            <if test="createTime != null">create_time = #{createTime},</if>
+            <if test="updateBy != null">update_by = #{updateBy},</if>
+            <if test="updateTime != null">update_time = #{updateTime},</if>
+            <if test="delFlag != null">del_flag = #{delFlag},</if>
+        </trim>
+        where id = #{id}
+    </update>
+
+    <delete id="deleteIeimsGnssStationById" parameterType="Long">
+        delete from ieims_gnss_station where id = #{id}
+    </delete>
+
+    <delete id="deleteIeimsGnssStationByIds" parameterType="String">
+        delete from ieims_gnss_station where id in 
+        <foreach item="id" collection="array" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </delete>
+
+</mapper>

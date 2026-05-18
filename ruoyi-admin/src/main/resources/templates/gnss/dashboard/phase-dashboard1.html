@@ -1,0 +1,1118 @@
+<!DOCTYPE html>
+<html lang="zh" xmlns:th="http://www.thymeleaf.org" xmlns:shiro="http://www.pollix.at/thymeleaf/shiro">
+<head>
+    <th:block th:include="include :: header('GNSS相位闪烁指数监控大屏')" />
+    <th:block th:include="include :: echarts-js" />
+    <style>
+        /* 大屏样式 */
+        body {
+            background-color: #0a1a2f;
+            color: #ffffff;
+            font-family: 'Microsoft YaHei', 'PingFang SC', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+        }
+
+        /* 大屏容器 */
+        .dashboard-container {
+            padding: 15px;
+            background: linear-gradient(135deg, #0a1a2f 0%, #0d2b42 100%);
+            min-height: 100vh;
+        }
+
+        /* 标题栏 */
+        .dashboard-header {
+            text-align: center;
+            margin-bottom: 25px;
+            position: relative;
+        }
+
+        .dashboard-header h1 {
+            font-size: 32px;
+            font-weight: bold;
+            background: linear-gradient(135deg, #00d4ff, #7b2cbf);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+            margin: 0;
+            padding: 15px 0;
+            text-shadow: 0 0 20px rgba(0,212,255,0.3);
+        }
+
+        .dashboard-header .subtitle {
+            font-size: 14px;
+            color: #8ba0bc;
+            margin-top: 5px;
+        }
+
+        /* 统计卡片 */
+        .stat-card {
+            background: rgba(15, 35, 55, 0.85);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            backdrop-filter: blur(10px);
+            transition: all 0.3s ease;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 10px 30px rgba(0,212,255,0.2);
+            border-color: rgba(0,212,255,0.5);
+        }
+
+        .stat-card .stat-label {
+            font-size: 14px;
+            color: #8ba0bc;
+            margin-bottom: 10px;
+        }
+
+        .stat-card .stat-value {
+            font-size: 36px;
+            font-weight: bold;
+        }
+
+        .stat-card .stat-unit {
+            font-size: 14px;
+            margin-left: 5px;
+            color: #8ba0bc;
+        }
+
+        /* 等级颜色 */
+        .level-none { color: #00C851; }
+        .level-weak { color: #FFBB33; }
+        .level-moderate { color: #FF8800; }
+        .level-severe { color: #FF4444; }
+
+        /* 状态指示灯 */
+        .status-led {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+            animation: pulse 1.5s infinite;
+        }
+
+        .status-led.green { background-color: #00C851; box-shadow: 0 0 8px #00C851; }
+        .status-led.yellow { background-color: #FFBB33; box-shadow: 0 0 8px #FFBB33; }
+        .status-led.orange { background-color: #FF8800; box-shadow: 0 0 8px #FF8800; }
+        .status-led.red { background-color: #FF4444; box-shadow: 0 0 8px #FF4444; }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* 表格样式 */
+        .table-custom {
+            background: rgba(15, 35, 55, 0.85);
+            border-radius: 12px;
+            overflow: hidden;
+            margin-bottom: 0;
+        }
+
+        .table-custom thead th {
+            background: rgba(0, 212, 255, 0.15);
+            border: none;
+            color: #00d4ff;
+            font-weight: 500;
+            padding: 12px 8px;
+            font-size: 13px;
+        }
+
+        .table-custom tbody td {
+            border-color: rgba(255,255,255,0.05);
+            color: #e0e0e0;
+            padding: 10px 8px;
+            font-size: 13px;
+            vertical-align: middle;
+        }
+
+        .table-custom tbody tr:hover {
+            background: rgba(0, 212, 255, 0.08);
+        }
+
+        /* 高亮更新的行 */
+        .data-updated {
+            background: rgba(0,212,255,0.2) !important;
+            transition: background 0.5s;
+        }
+
+        .blink {
+            animation: pulse 1s ease-in-out;
+        }
+
+        /* 图表容器 */
+        .chart-container {
+            background: rgba(15, 35, 55, 0.85);
+            border-radius: 12px;
+            padding: 15px;
+            margin-bottom: 20px;
+            border: 1px solid rgba(0, 212, 255, 0.2);
+        }
+
+        .chart-container h4 {
+            font-size: 16px;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid rgba(0,212,255,0.3);
+            color: #00d4ff;
+        }
+
+        .chart-box {
+            height: 300px;
+            width: 100%;
+        }
+
+        /* 告警横幅 */
+        .alert-banner {
+            background: linear-gradient(90deg, rgba(255,68,68,0.2), rgba(255,68,68,0.05));
+            border-left: 4px solid #FF4444;
+            border-radius: 8px;
+            padding: 12px 20px;
+            margin-bottom: 20px;
+        }
+
+        .alert-banner.warning {
+            border-left-color: #FF8800;
+            background: linear-gradient(90deg, rgba(255,136,0,0.2), rgba(255,136,0,0.05));
+        }
+
+        .alert-banner.info {
+            border-left-color: #00d4ff;
+            background: linear-gradient(90deg, rgba(0,212,255,0.2), rgba(0,212,255,0.05));
+        }
+
+        .alert-banner.success {
+            border-left-color: #00C851;
+            background: linear-gradient(90deg, rgba(0,200,81,0.2), rgba(0,200,81,0.05));
+        }
+
+        /* 刷新按钮 */
+        .refresh-btn {
+            position: absolute;
+            right: 20px;
+            top: 20px;
+            background: rgba(0,212,255,0.2);
+            border: 1px solid rgba(0,212,255,0.5);
+            color: #00d4ff;
+            border-radius: 20px;
+            padding: 5px 15px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .refresh-btn:hover {
+            background: rgba(0,212,255,0.4);
+        }
+
+        /* 时间显示 */
+        .time-display {
+            position: absolute;
+            right: 20px;
+            bottom: 20px;
+            font-size: 12px;
+            color: #6c8aac;
+        }
+
+        /* WebSocket状态提示 */
+        .ws-status {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            padding: 6px 12px;
+            background: rgba(0,0,0,0.6);
+            border-radius: 20px;
+            font-size: 11px;
+            z-index: 1000;
+        }
+
+        .ws-connected { color: #2ecc71; }
+        .ws-disconnected { color: #e74c3c; }
+
+        /* 滚动条 */
+        .table-wrapper {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .table-wrapper::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+
+        .table-wrapper::-webkit-scrollbar-track {
+            background: rgba(255,255,255,0.05);
+            border-radius: 3px;
+        }
+
+        .table-wrapper::-webkit-scrollbar-thumb {
+            background: rgba(0,212,255,0.3);
+            border-radius: 3px;
+        }
+
+        .table-wrapper::-webkit-scrollbar-thumb:hover {
+            background: rgba(0,212,255,0.5);
+        }
+
+        /* 响应式 */
+        @media (max-width: 768px) {
+            .stat-card .stat-value { font-size: 24px; }
+            .dashboard-header h1 { font-size: 24px; }
+        }
+
+        /* 加载动画 */
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(10,26,47,0.9);
+            z-index: 9999;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 3px solid rgba(0,212,255,0.3);
+            border-top-color: #00d4ff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+<div class="dashboard-container">
+    <!-- 加载遮罩 -->
+    <div id="loadingOverlay" class="loading-overlay" style="display: none;">
+        <div class="spinner"></div>
+    </div>
+
+    <!-- 刷新按钮 -->
+    <div class="refresh-btn" onclick="phaseDashboard.refreshData()">
+        <i class="fa fa-refresh"></i> 刷新数据
+    </div>
+
+    <!-- 标题栏 -->
+    <div class="dashboard-header">
+        <h1>
+            <i class="fa fa-satellite"></i>
+            GNSS相位闪烁指数监控大屏
+        </h1>
+        <div class="subtitle">
+            Phase Scintillation Index (σφ) Monitoring Dashboard
+        </div>
+    </div>
+
+    <!-- 告警横幅 -->
+    <div id="alertBanner" class="alert-banner success">
+        <i class="fa fa-check-circle"></i>
+        <span id="alertMessage">系统运行正常</span>
+    </div>
+
+    <!-- 统计卡片行 -->
+    <div class="row">
+        <div class="col-lg-3 col-md-6 col-sm-12">
+            <div class="stat-card">
+                <div class="stat-label">
+                    <i class="fa fa-dashboard"></i> 整体状态
+                </div>
+                <div class="stat-value" id="overallStatus">
+                    <span class="status-led green"></span>正常
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-3 col-md-6 col-sm-12">
+            <div class="stat-card">
+                <div class="stat-label">
+                    <i class="fa fa-microchip"></i> 监测卫星数
+                </div>
+                <div class="stat-value">
+                    <span id="totalSatellites">0</span>
+                    <span class="stat-unit">颗</span>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-3 col-md-6 col-sm-12">
+            <div class="stat-card">
+                <div class="stat-label">
+                    <i class="fa fa-flag"></i> 监测站数量
+                </div>
+                <div class="stat-value">
+                    <span id="totalStations">0</span>
+                    <span class="stat-unit">个</span>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-3 col-md-6 col-sm-12">
+            <div class="stat-card">
+                <div class="stat-label">
+                    <i class="fa fa-clock-o"></i> 最后更新
+                </div>
+                <div class="stat-value" style="font-size: 16px;">
+                    <span id="lastUpdateTime">--:--:--</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 等级分布统计卡片 -->
+    <div class="row">
+        <div class="col-lg-3 col-md-6 col-sm-12">
+            <div class="stat-card">
+                <div class="stat-label">
+                    <i class="fa fa-check-circle" style="color:#00C851"></i> 无闪烁
+                </div>
+                <div class="stat-value level-none">
+                    <span id="noneCount">0</span>
+                    <span class="stat-unit">颗</span>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-3 col-md-6 col-sm-12">
+            <div class="stat-card">
+                <div class="stat-label">
+                    <i class="fa fa-exclamation-triangle" style="color:#FFBB33"></i> 弱闪烁
+                </div>
+                <div class="stat-value level-weak">
+                    <span id="weakCount">0</span>
+                    <span class="stat-unit">颗</span>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-3 col-md-6 col-sm-12">
+            <div class="stat-card">
+                <div class="stat-label">
+                    <i class="fa fa-exclamation-circle" style="color:#FF8800"></i> 中等闪烁
+                </div>
+                <div class="stat-value level-moderate">
+                    <span id="moderateCount">0</span>
+                    <span class="stat-unit">颗</span>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-3 col-md-6 col-sm-12">
+            <div class="stat-card">
+                <div class="stat-label">
+                    <i class="fa fa-bell" style="color:#FF4444"></i> 强闪烁
+                </div>
+                <div class="stat-value level-severe">
+                    <span id="severeCount">0</span>
+                    <span class="stat-unit">颗</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 图表行 -->
+    <div class="row">
+        <div class="col-lg-6 col-md-12">
+            <div class="chart-container">
+                <h4><i class="fa fa-pie-chart"></i> 闪烁等级分布</h4>
+                <div id="levelChart" class="chart-box"></div>
+            </div>
+        </div>
+        <div class="col-lg-6 col-md-12">
+            <div class="chart-container">
+                <h4><i class="fa fa-bar-chart"></i> 监测站闪烁指数排行</h4>
+                <div id="stationsChart" class="chart-box"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 监测站统计表格 -->
+    <div class="row">
+        <div class="col-lg-12">
+            <div class="chart-container">
+                <h4><i class="fa fa-building"></i> 监测站统计信息</h4>
+                <div class="table-wrapper">
+                    <table class="table table-custom table-hover">
+                        <thead>
+                        <tr>
+                            <th>#</th>
+                            <th>监测站ID</th>
+                            <th>卫星数量</th>
+                            <th>最大σφ指数</th>
+                            <th>平均σφ指数</th>
+                            <th>最差等级</th>
+                            <th>等级分布</th>
+                        </tr>
+                        </thead>
+                        <tbody id="stationStatsBody">
+                        <tr><td colspan="7" class="text-center">暂无数据</td><tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 卫星详情表格 -->
+    <div class="row">
+        <div class="col-lg-12">
+            <div class="chart-container">
+                <h4><i class="fa fa-satellite-dish"></i> 卫星闪烁详情</h4>
+                <div class="table-wrapper">
+                    <table class="table table-custom table-hover">
+                        <thead>
+                        <tr>
+                            <th>监测站ID</th>
+                            <th>卫星编号</th>
+                            <th>σφ指数</th>
+                            <th>闪烁等级</th>
+                            <th>样本数</th>
+                            <th>告警信息</th>
+                        </tr>
+                        </thead>
+                        <tbody id="satelliteDetailsBody">
+                        <tr><td colspan="6" class="text-center">暂无数据</td><tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 时间显示 -->
+    <div class="time-display">
+        <i class="fa fa-clock-o"></i>
+        系统时间: <span id="systemTime"></span>
+    </div>
+
+    <div class="ws-status">
+        <i class="fa fa-plug"></i>
+        WebSocket状态: <span id="wsStatus" class="ws-disconnected">连接中...</span>
+    </div>
+</div>
+
+<script th:src="@{/js/websocket/sockjs.min.js}"></script>
+<script th:src="@{/js/websocket/stomp.min.js}"></script>
+<th:block th:include="include :: footer" />
+
+<script th:inline="javascript">
+    // 获取上下文路径
+    var ctx = [[@{/}]];
+
+    // =============================================
+    // 相位闪烁指数大屏控制器 (使用STOMP WebSocket)
+    // =============================================
+    var phaseDashboard = {
+        stompClient: null,
+        connected: false,
+        refreshInterval: null,
+        chartInstances: {},
+        currentDataMap: {},  // 缓存当前数据用于高亮更新
+
+        // 初始化
+        init: function() {
+            // 更新时间显示
+            this.startTimeUpdater();
+            // 初始化图表
+            this.initCharts();
+            // 初始化WebSocket (STOMP)
+            this.initWebSocket();
+            // 加载初始数据
+            this.loadInitialData();
+        },
+
+        // 初始化图表
+        initCharts: function() {
+            if (typeof echarts !== 'undefined') {
+                this.chartInstances.levelChart = echarts.init(document.getElementById('levelChart'));
+                this.chartInstances.stationsChart = echarts.init(document.getElementById('stationsChart'));
+
+                // 响应窗口大小变化
+                window.addEventListener('resize', function() {
+                    for (var key in phaseDashboard.chartInstances) {
+                        if (phaseDashboard.chartInstances[key]) {
+                            phaseDashboard.chartInstances[key].resize();
+                        }
+                    }
+                });
+            } else {
+                console.warn('ECharts未加载');
+            }
+        },
+
+        // 初始化WebSocket (使用STOMP协议，参考index-s4.html)
+        initWebSocket: function() {
+            var self = this;
+            var socketUrl = ctx + 'ws/connect';
+            var socket = new SockJS(socketUrl);
+            this.stompClient = Stomp.over(socket);
+
+            // 关闭调试输出，避免控制台噪音
+            this.stompClient.debug = null;
+
+            // 设置心跳
+            this.stompClient.heartbeat.outgoing = 20000;
+            this.stompClient.heartbeat.incoming = 20000;
+
+            this.stompClient.connect({}, function(frame) {
+                console.log('WebSocket连接成功: ' + frame);
+                self.connected = true;
+                $('#wsStatus').text('已连接').removeClass('ws-disconnected').addClass('ws-connected');
+
+                // 订阅相位闪烁指数主题 (使用 /topic/phase 与后端推送一致)
+                self.stompClient.subscribe('/topic/phase', function(message) {
+                    try {
+                        console.log('收到WebSocket消息');
+                        var msg = JSON.parse(message.body);
+                        var phaseData = null;
+
+                        // 兼容不同的消息格式
+                        if (msg.msgType === 'data' && msg.content === '相位闪烁指数数据更新') {
+                            phaseData = JSON.parse(msg.extraData);
+                        } else if (msg.extraData) {
+                            phaseData = JSON.parse(msg.extraData);
+                        } else {
+                            phaseData = msg;
+                        }
+
+                        // 处理实时数据更新
+                        self.handleRealTimeData(phaseData);
+                    } catch(e) {
+                        console.error('处理WebSocket消息失败:', e, message.body);
+                    }
+                });
+
+                // 可选：订阅系统通知
+                self.stompClient.subscribe('/topic/gnss/notify', function(message) {
+                    console.log('收到通知:', message.body);
+                });
+
+            }, function(error) {
+                console.error('WebSocket连接失败:', error);
+                $('#wsStatus').text('连接失败').removeClass('ws-connected').addClass('ws-disconnected');
+                // 5秒后重连
+                setTimeout(function() {
+                    phaseDashboard.initWebSocket();
+                }, 5000);
+            });
+        },
+
+        // 处理实时数据更新 (参考index-s4.html的updateRealTimeData)
+        handleRealTimeData: function(data) {
+            console.log('收到实时数据，类型:', typeof data, data);
+
+            // 兼容处理：如果是字符串，先解析
+            if (typeof data === 'string') {
+                try {
+                    data = JSON.parse(data);
+                } catch(e) {
+                    console.error('解析数据字符串失败:', e);
+                    return;
+                }
+            }
+
+            // 兼容处理：如果不是数组且是汇总数据，直接渲染
+            if (!Array.isArray(data)) {
+                // 如果是汇总数据对象，直接渲染
+                if (data.totalSatellites !== undefined || data.stationStats) {
+                    this.renderData(data);
+                    return;
+                }
+                // 否则转换为数组
+                data = [data];
+            }
+
+            // 更新卫星详情表格中的对应行
+            for (var i = 0; i < data.length; i++) {
+                var item = data[i];
+                if (!item) continue;
+
+                var stationId = item.stationId;
+                var satNo = item.satNo;
+
+                if (!stationId || !satNo) {
+                    console.warn('数据缺少stationId或satNo:', item);
+                    continue;
+                }
+
+                // 更新缓存
+                var cacheKey = stationId + '_' + satNo;
+                this.currentDataMap[cacheKey] = item;
+
+                // 查找并更新卫星详情表格中的行
+                var rows = $('#satelliteDetailsBody tr');
+                var targetRow = null;
+
+                for (var j = 0; j < rows.length; j++) {
+                    var row = $(rows[j]);
+                    var rowStationId = row.find('td:first').text().trim();
+                    var rowSatNo = row.find('td:eq(1)').text().trim();
+                    if (rowStationId === stationId && rowSatNo === satNo) {
+                        targetRow = row;
+                        break;
+                    }
+                }
+
+                if (targetRow && targetRow.length > 0) {
+                    var phi4Value = item.phi4 !== undefined && item.phi4 >= 0 ? item.phi4.toFixed(3) : '--';
+                    var levelClass = this.getLevelClass(item.levelName);
+
+                    targetRow.find('td:eq(2)').text(phi4Value);
+                    targetRow.find('td:eq(3)').html('<span class="' + levelClass + '">' + (item.levelName || '-') + '</span>');
+                    targetRow.find('td:eq(4)').text(item.sampleCount || 0);
+                    targetRow.find('td:eq(5)').text(item.alertMessage || '-');
+
+                    // 添加高亮效果
+                    targetRow.addClass('data-updated');
+                    setTimeout(function() {
+                        targetRow.removeClass('data-updated');
+                    }, 500);
+                    targetRow.addClass('blink');
+                    setTimeout(function() {
+                        targetRow.removeClass('blink');
+                    }, 1000);
+                }
+            }
+
+            // 刷新监测站统计数据
+            this.refreshStationData();
+        },
+
+        // 加载初始数据
+        loadInitialData: function() {
+            this.showLoading(true);
+            $.ajax({
+                url: ctx + 'gnss/phase/summary',
+                type: 'GET',
+                dataType: 'json',
+                success: function(response) {
+                    if (response.code === 0 && response.data) {
+                        phaseDashboard.renderData(response.data);
+                        // 缓存数据
+                        if (response.data.details) {
+                            for (var i = 0; i < response.data.details.length; i++) {
+                                var d = response.data.details[i];
+                                phaseDashboard.currentDataMap[d.stationId + '_' + d.satNo] = d;
+                            }
+                        }
+                    } else {
+                        console.warn('获取数据失败:', response.msg);
+                    }
+                },
+                error: function(xhr, status, error) {
+                    console.error('请求失败:', error);
+                },
+                complete: function() {
+                    phaseDashboard.showLoading(false);
+                }
+            });
+        },
+
+        // 刷新数据（手动）
+        refreshData: function() {
+            this.loadInitialData();
+        },
+
+        // 刷新监测站统计数据
+        refreshStationData: function() {
+            $.ajax({
+                url: ctx + 'gnss/phase/summary',
+                type: 'GET',
+                success: function(response) {
+                    if (response.code === 0 && response.data) {
+                        // 只更新监测站统计部分
+                        phaseDashboard.updateStationStatsOnly(response.data);
+                    }
+                },
+                error: function() {
+                    console.error('刷新监测站数据失败');
+                }
+            });
+        },
+
+        // 仅更新监测站统计
+        updateStationStatsOnly: function(summary) {
+            // 更新监测站数量
+            var stationCount = (summary.stationStats || []).length;
+            $('#totalStations').text(stationCount);
+
+            // 更新等级分布
+            var levelDist = summary.levelDistribution || {};
+            $('#noneCount').text(levelDist['无闪烁'] || 0);
+            $('#weakCount').text(levelDist['弱闪烁'] || 0);
+            $('#moderateCount').text(levelDist['中等闪烁'] || 0);
+            $('#severeCount').text(levelDist['强闪烁'] || 0);
+
+            // 更新整体状态
+            this.updateOverallStatus(summary.overallStatus, summary.overallColor);
+            $('#totalSatellites').text(summary.totalSatellites || 0);
+
+            // 更新时间
+            if (summary.reportTime) {
+                var reportDate = new Date(summary.reportTime);
+                $('#lastUpdateTime').text(this.formatTime(reportDate));
+            }
+
+            // 更新告警横幅
+            this.updateAlertBanner(summary);
+
+            // 重新渲染监测站统计表格
+            this.renderStationStats(summary.stationStats);
+
+            // 更新图表
+            this.updateLevelChart(summary.levelDistribution);
+            this.updateStationsChart(summary.stationStats);
+        },
+
+        // 渲染大屏数据
+        renderData: function(summary) {
+            if (!summary) return;
+
+            // 更新整体状态
+            this.updateOverallStatus(summary.overallStatus, summary.overallColor);
+            $('#totalSatellites').text(summary.totalSatellites || 0);
+
+            // 更新监测站数量
+            var stationCount = (summary.stationStats || []).length;
+            $('#totalStations').text(stationCount);
+
+            // 更新时间
+            if (summary.reportTime) {
+                var reportDate = new Date(summary.reportTime);
+                $('#lastUpdateTime').text(this.formatTime(reportDate));
+            }
+
+            // 更新等级分布
+            var levelDist = summary.levelDistribution || {};
+            $('#noneCount').text(levelDist['无闪烁'] || 0);
+            $('#weakCount').text(levelDist['弱闪烁'] || 0);
+            $('#moderateCount').text(levelDist['中等闪烁'] || 0);
+            $('#severeCount').text(levelDist['强闪烁'] || 0);
+
+            // 更新告警横幅
+            this.updateAlertBanner(summary);
+
+            // 更新监测站统计表格
+            this.renderStationStats(summary.stationStats);
+
+            // 更新卫星详情表格
+            this.renderSatelliteDetails(summary.details);
+
+            // 更新图表
+            this.updateCharts(summary);
+        },
+
+        // 更新整体状态显示
+        updateOverallStatus: function(status, color) {
+            var statusHtml = '';
+            var ledClass = 'green';
+
+            if (color === '#FF4444') {
+                ledClass = 'red';
+            } else if (color === '#FF8800') {
+                ledClass = 'orange';
+            } else if (color === '#FFBB33') {
+                ledClass = 'yellow';
+            } else {
+                ledClass = 'green';
+            }
+
+            statusHtml = '<span class="status-led ' + ledClass + '"></span>' + (status || '未知');
+            $('#overallStatus').html(statusHtml);
+        },
+
+        // 更新告警横幅
+        updateAlertBanner: function(summary) {
+            var banner = $('#alertBanner');
+            var message = summary.overallStatus || '系统运行正常';
+            var color = summary.overallColor || '#00C851';
+
+            banner.removeClass('success warning info');
+
+            if (color === '#FF4444') {
+                banner.addClass('warning');
+                banner.html('<i class="fa fa-bell"></i> <span id="alertMessage">⚠️ ' + message + '</span>');
+            } else if (color === '#FF8800') {
+                banner.addClass('warning');
+                banner.html('<i class="fa fa-exclamation-triangle"></i> <span id="alertMessage">⚡ ' + message + '</span>');
+            } else if (color === '#FFBB33') {
+                banner.addClass('info');
+                banner.html('<i class="fa fa-info-circle"></i> <span id="alertMessage">ℹ️ ' + message + '</span>');
+            } else {
+                banner.addClass('success');
+                banner.html('<i class="fa fa-check-circle"></i> <span id="alertMessage">✅ ' + message + '</span>');
+            }
+        },
+
+        // 渲染监测站统计表格
+        renderStationStats: function(stats) {
+            var tbody = $('#stationStatsBody');
+            if (!stats || stats.length === 0) {
+                tbody.html('<tr><td colspan="7" class="text-center">暂无数据</td></tr>');
+                return;
+            }
+
+            var html = '';
+            for (var i = 0; i < stats.length; i++) {
+                var stat = stats[i];
+                var worstLevelClass = this.getLevelClass(stat.worstLevel);
+                var levelDistHtml = this.formatLevelDistribution(stat.levelDistribution);
+
+                html += '<tr>';
+                html += '<td>' + (i + 1) + '</td>';
+                html += '<td><strong>' + this.escapeHtml(stat.stationId) + '</strong></td>';
+                html += '<td>' + (stat.satelliteCount || 0) + '</td>';
+                html += '<td>' + (stat.maxPhi4 ? stat.maxPhi4.toFixed(3) : '-') + '</td>';
+                html += '<td>' + (stat.avgPhi4 ? stat.avgPhi4.toFixed(3) : '-') + '</td>';
+                html += '<td class="' + worstLevelClass + '">' + (stat.worstLevel || '-') + '</td>';
+                html += '<td>' + levelDistHtml + '</td>';
+                html += '</tr>';
+            }
+            tbody.html(html);
+        },
+
+        // 格式化等级分布显示
+        formatLevelDistribution: function(levelDist) {
+            if (!levelDist) return '-';
+            var parts = [];
+            if (levelDist['无闪烁'] > 0) parts.push('<span class="level-none">▲' + levelDist['无闪烁'] + '</span>');
+            if (levelDist['弱闪烁'] > 0) parts.push('<span class="level-weak">●' + levelDist['弱闪烁'] + '</span>');
+            if (levelDist['中等闪烁'] > 0) parts.push('<span class="level-moderate">◆' + levelDist['中等闪烁'] + '</span>');
+            if (levelDist['强闪烁'] > 0) parts.push('<span class="level-severe">★' + levelDist['强闪烁'] + '</span>');
+            return parts.join(' ') || '-';
+        },
+
+        // 渲染卫星详情表格
+        renderSatelliteDetails: function(details) {
+            var tbody = $('#satelliteDetailsBody');
+            if (!details || details.length === 0) {
+                tbody.html('<tr><td colspan="6" class="text-center">暂无数据</td></tr>');
+                return;
+            }
+
+            // 按监测站分组展示
+            var stationMap = {};
+            for (var i = 0; i < details.length; i++) {
+                var d = details[i];
+                if (!stationMap[d.stationId]) {
+                    stationMap[d.stationId] = [];
+                }
+                stationMap[d.stationId].push(d);
+            }
+
+            var html = '';
+            for (var sId in stationMap) {
+                var sats = stationMap[sId];
+                for (var k = 0; k < sats.length; k++) {
+                    var sat = sats[k];
+                    var levelClass = this.getLevelClass(sat.levelName);
+                    var phi4Value = sat.phi4 !== undefined && sat.phi4 >= 0 ? sat.phi4.toFixed(3) : '--';
+
+                    html += '<tr data-station="' + this.escapeHtml(sId) + '" data-satno="' + this.escapeHtml(sat.satNo) + '">';
+                    if (k === 0) {
+                        html += '<td rowspan="' + sats.length + '"><strong>' + this.escapeHtml(sId) + '</strong></td>';
+                    }
+                    html += '<td>' + this.escapeHtml(sat.satNo) + '</td>';
+                    html += '<td>' + phi4Value + '</td>';
+                    html += '<td class="' + levelClass + '">' + (sat.levelName || '-') + '</td>';
+                    html += '<td>' + (sat.sampleCount || 0) + '</td>';
+                    html += '<td>' + this.escapeHtml(sat.alertMessage || '-') + '</td>';
+                    html += '</tr>';
+                }
+            }
+
+            if (html === '') {
+                html = '<tr><td colspan="6" class="text-center">暂无数据</td></tr>';
+            }
+            tbody.html(html);
+        },
+
+        // 获取等级对应的CSS类
+        getLevelClass: function(levelName) {
+            if (levelName === '强闪烁') return 'level-severe';
+            if (levelName === '中等闪烁') return 'level-moderate';
+            if (levelName === '弱闪烁') return 'level-weak';
+            return 'level-none';
+        },
+
+        // 更新图表
+        updateCharts: function(summary) {
+            this.updateLevelChart(summary.levelDistribution);
+            this.updateStationsChart(summary.stationStats);
+        },
+
+        // 更新等级分布饼图
+        updateLevelChart: function(levelDist) {
+            if (!this.chartInstances.levelChart) return;
+
+            var data = [
+                { value: levelDist['无闪烁'] || 0, name: '无闪烁', itemStyle: { color: '#00C851' } },
+                { value: levelDist['弱闪烁'] || 0, name: '弱闪烁', itemStyle: { color: '#FFBB33' } },
+                { value: levelDist['中等闪烁'] || 0, name: '中等闪烁', itemStyle: { color: '#FF8800' } },
+                { value: levelDist['强闪烁'] || 0, name: '强闪烁', itemStyle: { color: '#FF4444' } }
+            ];
+
+            var option = {
+                title: { show: false },
+                tooltip: {
+                    trigger: 'item',
+                    formatter: '{b}: {c} ({d}%)',
+                    backgroundColor: 'rgba(10,26,47,0.9)',
+                    borderColor: '#00d4ff',
+                    textStyle: { color: '#fff' }
+                },
+                legend: {
+                    orient: 'vertical',
+                    left: 'left',
+                    textStyle: { color: '#e0e0e0' },
+                    data: ['无闪烁', '弱闪烁', '中等闪烁', '强闪烁']
+                },
+                series: [{
+                    name: '闪烁等级',
+                    type: 'pie',
+                    radius: '55%',
+                    center: ['50%', '50%'],
+                    data: data,
+                    label: { color: '#fff', formatter: '{b}: {d}%' },
+                    emphasis: { scale: true, label: { show: true, fontWeight: 'bold' } }
+                }],
+                backgroundColor: 'transparent'
+            };
+            this.chartInstances.levelChart.setOption(option, true);
+        },
+
+        // 更新监测站排行柱状图
+        updateStationsChart: function(stats) {
+            if (!this.chartInstances.stationsChart || !stats || stats.length === 0) {
+                if (this.chartInstances.stationsChart) {
+                    this.chartInstances.stationsChart.clear();
+                }
+                return;
+            }
+
+            // 取前10个监测站
+            var topStations = stats.slice(0, 10);
+            var stationNames = [];
+            var maxPhi4Values = [];
+            var avgPhi4Values = [];
+
+            for (var i = 0; i < topStations.length; i++) {
+                var name = topStations[i].stationId;
+                if (name.length > 15) {
+                    name = name.substring(0, 12) + '...';
+                }
+                stationNames.push(name);
+                maxPhi4Values.push(topStations[i].maxPhi4 || 0);
+                avgPhi4Values.push(topStations[i].avgPhi4 || 0);
+            }
+
+            var option = {
+                title: { show: false },
+                tooltip: {
+                    trigger: 'axis',
+                    axisPointer: { type: 'shadow' },
+                    backgroundColor: 'rgba(10,26,47,0.9)',
+                    borderColor: '#00d4ff',
+                    textStyle: { color: '#fff' }
+                },
+                legend: {
+                    data: ['最大σφ', '平均σφ'],
+                    textStyle: { color: '#e0e0e0' },
+                    top: 0
+                },
+                grid: {
+                    left: '3%',
+                    right: '4%',
+                    bottom: '3%',
+                    containLabel: true,
+                    backgroundColor: 'transparent'
+                },
+                xAxis: {
+                    type: 'value',
+                    name: 'σφ指数',
+                    nameTextStyle: { color: '#8ba0bc' },
+                    axisLabel: { color: '#8ba0bc' },
+                    axisLine: { lineStyle: { color: '#2a4a6a' } }
+                },
+                yAxis: {
+                    type: 'category',
+                    data: stationNames.reverse(),
+                    axisLabel: { color: '#e0e0e0', fontSize: 11 },
+                    axisLine: { lineStyle: { color: '#2a4a6a' } },
+                    axisTick: { show: false }
+                },
+                series: [
+                    {
+                        name: '最大σφ',
+                        type: 'bar',
+                        data: maxPhi4Values.reverse(),
+                        itemStyle: { color: '#FF8800', borderRadius: [0, 4, 4, 0] },
+                        label: { show: true, position: 'right', formatter: '{c}', color: '#FF8800' }
+                    },
+                    {
+                        name: '平均σφ',
+                        type: 'bar',
+                        data: avgPhi4Values.reverse(),
+                        itemStyle: { color: '#00d4ff', borderRadius: [0, 4, 4, 0] },
+                        label: { show: true, position: 'right', formatter: '{c}', color: '#00d4ff' }
+                    }
+                ],
+                backgroundColor: 'transparent'
+            };
+            this.chartInstances.stationsChart.setOption(option, true);
+        },
+
+        // 显示/隐藏加载动画
+        showLoading: function(show) {
+            if (show) {
+                $('#loadingOverlay').fadeIn(200);
+            } else {
+                $('#loadingOverlay').fadeOut(200);
+            }
+        },
+
+        // 格式化时间
+        formatTime: function(date) {
+            if (!date) return '--:--:--';
+            var hours = date.getHours().toString().padStart(2, '0');
+            var minutes = date.getMinutes().toString().padStart(2, '0');
+            var seconds = date.getSeconds().toString().padStart(2, '0');
+            return hours + ':' + minutes + ':' + seconds;
+        },
+
+        // 启动时间更新器
+        startTimeUpdater: function() {
+            var self = this;
+            setInterval(function() {
+                $('#systemTime').text(self.formatTime(new Date()));
+            }, 1000);
+        },
+
+        // HTML转义
+        escapeHtml: function(str) {
+            if (!str) return '';
+            return String(str)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+    };
+
+    // 页面加载完成后初始化
+    $(document).ready(function() {
+        phaseDashboard.init();
+    });
+
+    // 页面关闭时断开WebSocket连接
+    $(window).on('beforeunload', function() {
+        if (phaseDashboard.stompClient && phaseDashboard.stompClient.connected) {
+            phaseDashboard.stompClient.disconnect();
+        }
+    });
+</script>
+</body>
+</html>

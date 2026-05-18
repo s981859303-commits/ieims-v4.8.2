@@ -1,0 +1,862 @@
+<!DOCTYPE html>
+<html lang="zh" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <th:block th:include="include :: header('GNSS电离层闪烁监测大屏')" />
+    <th:block th:include="include :: echarts-js" />
+    <style>
+        /* 大屏样式 */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #0a1a2f;
+            font-family: "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+            overflow: hidden;
+            height: 100vh;
+        }
+
+        /* 大屏容器 */
+        .dashboard-container {
+            width: 100%;
+            height: 100%;
+            padding: 20px;
+            position: relative;
+            background: linear-gradient(135deg, #0a1a2f 0%, #0d2b3e 100%);
+        }
+
+        /* 头部 */
+        .dashboard-header {
+            text-align: center;
+            margin-bottom: 20px;
+            position: relative;
+        }
+
+        .dashboard-header h1 {
+            font-size: 32px;
+            color: #00d4ff;
+            text-shadow: 0 0 10px rgba(0,212,255,0.5);
+            letter-spacing: 4px;
+        }
+
+        .dashboard-header .subtitle {
+            color: #7f8fa4;
+            font-size: 14px;
+            margin-top: 8px;
+        }
+
+        .current-time {
+            position: absolute;
+            right: 20px;
+            top: 10px;
+            color: #00d4ff;
+            font-size: 16px;
+            background: rgba(0,0,0,0.4);
+            padding: 8px 16px;
+            border-radius: 20px;
+        }
+
+        /* 监测站卡片 */
+        .station-card {
+            background: linear-gradient(135deg, rgba(15,40,60,0.95) 0%, rgba(10,30,50,0.95) 100%);
+            border-radius: 12px;
+            border: 1px solid rgba(0,212,255,0.3);
+            margin-bottom: 20px;
+            overflow: hidden;
+            transition: all 0.3s;
+        }
+
+        .station-card:hover {
+            border-color: #00d4ff;
+            box-shadow: 0 0 20px rgba(0,212,255,0.2);
+        }
+
+        .station-header {
+            padding: 15px 20px;
+            background: rgba(0,212,255,0.1);
+            border-bottom: 1px solid rgba(0,212,255,0.2);
+            cursor: pointer;
+        }
+
+        .station-header h3 {
+            color: #00d4ff;
+            font-size: 18px;
+            margin: 0;
+            display: inline-block;
+        }
+
+        .station-status {
+            float: right;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+        }
+
+        .status-normal { background: #2ecc71; color: #fff; }
+        .status-warning { background: #f39c12; color: #fff; }
+        .status-severe { background: #e74c3c; color: #fff; }
+        .status-attention { background: #3498db; color: #fff; }
+
+        .station-stats {
+            padding: 10px 20px;
+            color: #b0c4de;
+            font-size: 13px;
+            background: rgba(0,0,0,0.2);
+        }
+
+        .station-stats span {
+            margin-right: 20px;
+        }
+
+        .station-stats .warning-count { color: #f39c12; }
+        .station-stats .severe-count { color: #e74c3c; }
+
+        /* 卫星表格 */
+        .satellite-table {
+            width: 100%;
+            padding: 0 20px 20px 20px;
+        }
+
+        .satellite-table table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        .satellite-table th,
+        .satellite-table td {
+            padding: 10px 8px;
+            text-align: center;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .satellite-table th {
+            color: #00d4ff;
+            font-weight: normal;
+            background: rgba(0,212,255,0.05);
+        }
+
+        .satellite-table td {
+            color: #e0e0e0;
+        }
+
+        .satellite-table tr:hover {
+            background: rgba(0,212,255,0.1);
+        }
+
+        /* S4进度条 */
+        .s4-progress {
+            width: 80px;
+            height: 6px;
+            background: rgba(255,255,255,0.2);
+            border-radius: 3px;
+            overflow: hidden;
+            display: inline-block;
+            margin-left: 8px;
+        }
+
+        .s4-progress-bar {
+            height: 100%;
+            border-radius: 3px;
+            transition: width 0.3s;
+        }
+
+        .s4-bar-normal { background: #2ecc71; }
+        .s4-bar-moderate { background: #3498db; }
+        .s4-bar-strong { background: #f39c12; }
+        .s4-bar-severe { background: #e74c3c; }
+
+        /* 闪烁等级标识 */
+        .level-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: bold;
+        }
+
+        .level-0 { background: #2ecc71; color: #fff; }
+        .level-1 { background: #3498db; color: #fff; }
+        .level-2 { background: #f39c12; color: #fff; }
+        .level-3 { background: #e74c3c; color: #fff; }
+
+        /* 右侧面板 */
+        .right-panel {
+            background: linear-gradient(135deg, rgba(15,40,60,0.95) 0%, rgba(10,30,50,0.95) 100%);
+            border-radius: 12px;
+            border: 1px solid rgba(0,212,255,0.3);
+            height: calc(100vh - 120px);
+            overflow-y: auto;
+        }
+
+        .panel-header {
+            padding: 15px;
+            border-bottom: 1px solid rgba(0,212,255,0.2);
+            color: #00d4ff;
+            font-size: 16px;
+        }
+
+        /* ECharts容器 */
+        .chart-container {
+            height: 300px;
+            margin: 15px;
+        }
+
+        /* 滚动条样式 */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #1a2a3a;
+            border-radius: 3px;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #00d4ff;
+            border-radius: 3px;
+        }
+
+        /* 响应式布局 */
+        .left-panel {
+            padding-right: 15px;
+            overflow-y: auto;
+            height: calc(100vh - 120px);
+        }
+
+        /* WebSocket状态提示 */
+        .ws-status {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            padding: 6px 12px;
+            background: rgba(0,0,0,0.6);
+            border-radius: 20px;
+            font-size: 11px;
+            z-index: 1000;
+        }
+
+        .ws-connected { color: #2ecc71; }
+        .ws-disconnected { color: #e74c3c; }
+
+        /* 动画 */
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .blink {
+            animation: pulse 1s ease-in-out;
+        }
+
+        /* 数据行高亮 */
+        .data-updated {
+            background: rgba(0,212,255,0.2) !important;
+            transition: background 0.5s;
+        }
+    </style>
+</head>
+<body>
+<div class="dashboard-container">
+    <div class="dashboard-header">
+        <h1>GNSS电离层闪烁监测系统</h1>
+        <div class="subtitle">实时S4指数监测 · 电离层闪烁预警</div>
+        <div class="current-time" id="currentTime"></div>
+    </div>
+
+    <div class="row">
+        <!-- 左侧：监测站列表 -->
+        <div class="col-md-8 left-panel" id="stationPanel">
+            <!-- 监测站卡片会动态加载 -->
+        </div>
+
+        <!-- 右侧：详情面板 -->
+        <div class="col-md-4 right-panel">
+            <div class="panel-header">
+                <i class="fa fa-line-chart"></i> 卫星详情 & 趋势分析
+            </div>
+            <div id="satelliteInfo" style="padding: 15px; color: #b0c4de; text-align: center;">
+                请点击左侧卫星查看详情
+            </div>
+            <div id="trendChart" class="chart-container"></div>
+            <div id="satelliteStats" style="padding: 15px;"></div>
+        </div>
+    </div>
+
+    <div class="ws-status">
+        <i class="fa fa-plug"></i>
+        WebSocket状态: <span id="wsStatus" class="ws-disconnected">连接中...</span>
+    </div>
+</div>
+
+<script th:src="@{/js/websocket/sockjs.min.js}"></script>
+<script th:src="@{/js/websocket/stomp.min.js}"></script>
+<th:block th:include="include :: footer" />
+<script th:inline="javascript">
+    var ctx = /*[[@{/}]]*/'';
+    var currentStationId = null;
+    var currentSatNo = null;
+    var trendChart = null;
+    var stompClient = null;
+
+    // 闪烁等级映射
+    var levelMap = {
+        0: { name: "正常", class: "level-0", barClass: "s4-bar-normal" },
+        1: { name: "中等", class: "level-1", barClass: "s4-bar-moderate" },
+        2: { name: "较强", class: "level-2", barClass: "s4-bar-strong" },
+        3: { name: "强烈", class: "level-3", barClass: "s4-bar-severe" }
+    };
+
+    $(function() {
+        initTime();
+        initWebSocket();
+        loadStationsSummary();
+        initTrendChart();
+
+        // 定时刷新监测站数据（30秒）
+        setInterval(refreshStationData, 30000);
+    });
+
+    // 初始化时间显示
+    function initTime() {
+        updateCurrentTime();
+        setInterval(updateCurrentTime, 1000);
+    }
+
+    function updateCurrentTime() {
+        var now = new Date();
+        $('#currentTime').text(now.toLocaleString('zh-CN'));
+    }
+
+    // 初始化WebSocket (使用STOMP协议)
+    function initWebSocket() {
+        var socketUrl = ctx + 'ws/connect';
+        var socket = new SockJS(socketUrl);
+        stompClient = Stomp.over(socket);
+
+        // 关闭调试输出，避免控制台噪音
+        stompClient.debug = null;
+
+        // 设置心跳
+        stompClient.heartbeat.outgoing = 20000;
+        stompClient.heartbeat.incoming = 20000;
+
+        stompClient.connect({}, function(frame) {
+            console.log('WebSocket连接成功: ' + frame);
+            $('#wsStatus').text('已连接').removeClass('ws-disconnected').addClass('ws-connected');
+
+            // 订阅 S4 主题
+            stompClient.subscribe('/topic/gnss/s4', function(message) {
+                try {
+                    console.log('收到WebSocket消息');
+                    var msg = JSON.parse(message.body);
+                    var s4Data = null;
+
+                    // 兼容不同的消息格式
+                    if (msg.msgType === 'data' && msg.content === 'GNSS S4闪烁指数更新') {
+                        s4Data = JSON.parse(msg.extraData);
+                    } else if (msg.extraData) {
+                        s4Data = JSON.parse(msg.extraData);
+                    } else {
+                        s4Data = msg;
+                    }
+
+                    updateRealTimeData(s4Data);
+                } catch(e) {
+                    console.error('处理WebSocket消息失败:', e, message.body);
+                }
+            });
+
+            // 可选：订阅系统通知
+            stompClient.subscribe('/topic/gnss/notify', function(message) {
+                console.log('收到通知:', message.body);
+            });
+
+        }, function(error) {
+            console.error('WebSocket连接失败:', error);
+            $('#wsStatus').text('连接失败').removeClass('ws-connected').addClass('ws-disconnected');
+            // 5秒后重连
+            setTimeout(initWebSocket, 5000);
+        });
+    }
+
+    // 加载所有监测站概要
+    function loadStationsSummary() {
+        $.ajax({
+            url: ctx + 'gnss/dashboard/stations/summary',
+            type: 'GET',
+            success: function(response) {
+                if (response.code === 0) {
+                    renderStations(response.data);
+                }
+            },
+            error: function() {
+                console.error('加载监测站数据失败');
+            }
+        });
+    }
+
+    // 渲染监测站卡片
+    function renderStations(stations) {
+        var html = '';
+        for (var i = 0; i < stations.length; i++) {
+            var station = stations[i];
+            var statusClass = getStatusClass(station.status);
+            html += '<div class="station-card" data-station-id="' + station.stationId + '">';
+            html += '<div class="station-header" onclick="toggleStation(\'' + station.stationId + '\')">';
+            html += '<h3><i class="fa fa-map-marker"></i> ' + station.stationId + '</h3>';
+            html += '<span class="station-status ' + statusClass + '">' + station.status + '（点击可以展开/收起）</span>';
+            html += '</div>';
+            html += '<div class="station-stats">';
+            html += '<span><i class="fa fa-satellite"></i> 卫星数: ' + station.satelliteCount + '</span>';
+            html += '<span><i class="fa fa-tachometer"></i> 最大S4: ' + station.maxS4.toFixed(4) + '</span>';
+            html += '<span><i class="fa fa-chart-line"></i> 平均S4: ' + station.avgS4.toFixed(4) + '</span>';
+            html += '<span class="warning-count"><i class="fa fa-exclamation-triangle"></i> 警告: ' + station.warningCount + '</span>';
+            html += '<span class="severe-count"><i class="fa fa-bell"></i> 严重: ' + station.severeCount + '</span>';
+            html += '</div>';
+            html += '<div class="satellite-table" id="satTable_' + station.stationId + '" style="display:none;"></div>';
+            html += '</div>';
+        }
+        $('#stationPanel').html(html);
+
+        // 默认展开第一个站点
+        if (stations.length > 0) {
+            toggleStation(stations[0].stationId);
+        }
+    }
+
+    // 获取状态样式类
+    function getStatusClass(status) {
+        var map = {
+            '站点状态：正常': 'status-normal',
+            '站点状态：注意': 'status-attention',
+            '站点状态：警告': 'status-warning',
+            '站点状态：严重': 'status-severe'
+        };
+        return map[status] || 'status-normal';
+    }
+
+    // 切换监测站展开/收起
+    function toggleStation(stationId) {
+        var tableDiv = $('#satTable_' + stationId);
+        if (tableDiv.is(':visible')) {
+            tableDiv.slideUp();
+        } else {
+            // 收起其他所有
+            $('.satellite-table').slideUp();
+            // 加载卫星数据
+            loadSatellitesData(stationId);
+            tableDiv.slideDown();
+        }
+    }
+
+    // 加载监测站卫星数据
+    function loadSatellitesData(stationId) {
+        if (currentStationId === stationId) {
+            return;
+        }
+        currentStationId = stationId;
+
+        $.ajax({
+            url: ctx + 'gnss/dashboard/station/' + encodeURIComponent(stationId) + '/satellites',
+            type: 'GET',
+            success: function(response) {
+                if (response.code === 0) {
+                    renderSatellitesTable(stationId, response.data);
+                } else {
+                    $('#satTable_' + stationId).html('<div class="text-center" style="padding:20px;">暂无数据</div>');
+                }
+            },
+            error: function() {
+                $('#satTable_' + stationId).html('<div class="text-center" style="padding:20px;">加载失败</div>');
+            }
+        });
+    }
+
+    // 渲染卫星表格
+    function renderSatellitesTable(stationId, satellites) {
+        var html = '<table><thead><tr>';
+        html += '<th>卫星编号</th><th>S4指数</th><th>闪烁等级</th><th>样本数</th><th>更新时间</th><th>操作</th>';
+        html += '</tr></thead><tbody>';
+
+        for (var i = 0; i < satellites.length; i++) {
+            var sat = satellites[i];
+            var levelCode = sat.scintillationLevelCode || 0;
+            var levelInfo = levelMap[levelCode] || levelMap[0];
+            var barColor = getBarColor(sat.s4Index);
+
+            html += '<tr data-sat-no="' + sat.satNo + '">';
+            html += '<td>' + sat.satNo + '</td>';
+            html += '<td>';
+            html += (sat.s4Index || 0).toFixed(6);
+            html += '<div class="s4-progress">';
+            html += '<div class="s4-progress-bar ' + barColor + '" style="width:' + ((sat.s4Index || 0) * 100) + '%"></div>';
+            html += '</div>';
+            html += '</td>';
+            html += '<td><span class="level-badge ' + levelInfo.class + '">' + levelInfo.name + '</span></td>';
+            html += '<td>' + (sat.sampleCount || 0) + '</td>';
+            html += '<td>' + (sat.calcTime || '--') + '</td>';
+            html += '<td><button class="btn btn-xs btn-info" onclick="showSatelliteDetail(\'' + stationId + '\',\'' + sat.satNo + '\')">详情</button></td>';
+            html += '</tr>';
+        }
+
+        html += '</tbody></table>';
+        $('#satTable_' + stationId).html(html);
+    }
+
+    // 获取进度条颜色
+    function getBarColor(s4) {
+        if (s4 < 0.2) return 's4-bar-normal';
+        if (s4 < 0.4) return 's4-bar-moderate';
+        if (s4 < 0.6) return 's4-bar-strong';
+        return 's4-bar-severe';
+    }
+
+    // 显示卫星详情
+    function showSatelliteDetail(stationId, satNo) {
+        currentSatNo = satNo;
+        loadSatelliteTrend(stationId, satNo);
+    }
+
+    // 初始化趋势图表
+    function initTrendChart() {
+        trendChart = echarts.init(document.getElementById('trendChart'));
+        var option = {
+            title: {
+                text: 'S4指数趋势图',
+                textStyle: { color: '#00d4ff', fontSize: 14 }
+            },
+            tooltip: {
+                trigger: 'axis',
+                // 时间轴下建议自定义 tooltip 显示格式
+                formatter: function(params) {
+                    if (!params.length) return '';
+                    var date = new Date(params[0].value[0]);
+                    var timeStr = date.getHours().toString().padStart(2, '0') + ':' +
+                        date.getMinutes().toString().padStart(2, '0') + ':' +
+                        date.getSeconds().toString().padStart(2, '0');
+                    var res = timeStr + '<br/>';
+                    params.forEach(function(item) {
+                        if (item.value && item.value[1] !== null && item.value[1] !== undefined) {
+                            res += item.marker + item.seriesName + ': ' + item.value[1].toFixed(6) + '<br/>';
+                        } else {
+                            // 如果是故意插入的 null 断点，显示 "--" 或者直接忽略
+                            res += item.marker + item.seriesName + ': -- <br/>';
+                        }
+                    });
+                    return res;
+                }
+            },
+            legend: { data: ['S4指数', '阈值线'], textStyle: { color: '#b0c4de' } },
+            grid: { left: '10%', right: '10%', top: '15%', bottom: '10%', containLabel: true },
+            xAxis: {
+                type: 'time', // 【核心修改】由 category 改为 time
+                name: '时间',
+                axisLabel: {
+                    color: '#b0c4de',
+                    formatter: function (value) {
+                        // value 是 ECharts 传进来的时间戳
+                        var date = new Date(value);
+                        var h = date.getHours().toString().padStart(2, '0');
+                        var m = date.getMinutes().toString().padStart(2, '0');
+                        return h + ':' + m;
+                    }
+                },
+                axisLine: { lineStyle: { color: '#00d4ff' } },
+                splitLine: { show: false }
+            },
+            yAxis: {
+                type: 'value',
+                name: 'S4指数',
+                min: 0,
+                max: 1,
+                axisLabel: { color: '#b0c4de' },
+                axisLine: { lineStyle: { color: '#00d4ff' } },
+                splitLine: { lineStyle: { color: 'rgba(255,255,255,0.1)' } }
+            },
+            series: [
+                {
+                    name: 'S4指数',
+                    type: 'line',
+                    smooth: true,
+                    symbol: 'circle',
+                    lineStyle: { width: 2, color: '#00d4ff' },
+                    areaStyle: { opacity: 0.3, color: '#00d4ff' },
+                    data: [],
+                    connectNulls: false // 【重要】不连接空值，程序停机期间会显示为空白
+                },
+                {
+                    name: '阈值线',
+                    type: 'line',
+                    lineStyle: { width: 1, type: 'dashed', color: '#e74c3c' },
+                    data: [],
+                    symbol: 'none'
+                }
+            ]
+        };
+        trendChart.setOption(option);
+    }
+
+    // 加载卫星趋势数据
+    function loadSatelliteTrend(stationId, satNo) {
+        $('#satelliteInfo').html('<div style="text-align:center;padding:20px;"><i class="fa fa-spinner fa-spin"></i> 加载中...</div>');
+
+        $.ajax({
+            url: ctx + 'gnss/dashboard/satellite/trend',
+            type: 'GET',
+            data: { stationId: stationId, satNo: satNo, hours: 24 },
+            success: function(response) {
+                if (response.code === 0 && response.data) {
+                    updateSatelliteDetail(response.data);
+                    updateTrendChart(response.data);
+                } else {
+                    $('#satelliteInfo').html('<div style="text-align:center;padding:20px;">暂无趋势数据</div>');
+                }
+            },
+            error: function() {
+                $('#satelliteInfo').html('<div style="text-align:center;padding:20px;">加载失败</div>');
+            }
+        });
+    }
+
+    // 更新卫星详情面板
+    function updateSatelliteDetail(data) {
+        var currentS4 = data.currentS4 || 0;
+        var levelInfo = levelMap[getLevelCode(currentS4)] || levelMap[0];
+        var html = '<div style="text-align:center;">';
+        html += '<h4 style="color:#00d4ff;">' + (data.stationId || '--') + ' - ' + (data.satNo || '--') + '</h4>';
+        html += '<div style="margin:15px 0;">';
+        html += '<div style="font-size:36px;font-weight:bold;color:' + getLevelColor(currentS4) + '">' + currentS4.toFixed(6) + '</div>';
+        html += '<div><span class="level-badge ' + levelInfo.class + '" style="font-size:14px;margin-top:8px;">' + levelInfo.name + '</span></div>';
+        html += '</div>';
+        html += '<table style="width:100%;margin-top:15px;">';
+        html += '<tr><td style="padding:8px;">最大S4:</td><td style="color:#f39c12;">' + (data.maxS4 || 0).toFixed(6) + '</td></tr>';
+        html += '<tr><td style="padding:8px;">平均S4:</td><td style="color:#3498db;">' + (data.avgS4 || 0).toFixed(6) + '</td></tr>';
+        html += '</table>';
+        html += '</div>';
+        $('#satelliteInfo').html(html);
+    }
+
+    // 更新趋势图表
+    function updateTrendChart(data) {
+        var times = data.timeList || []; // 这里应确保后端返回的是完整时间戳或日期字符串
+        var s4Values = data.s4List || [];
+
+        var trendData = [];
+        var thresholdData = [];
+
+        // 定义一个断线阈值，比如 5 分钟 (5 * 60 * 1000 毫秒)
+        // 超过这个时间没有数据，就认为是停机了，断开连线
+        var gapThreshold = 5 * 60 * 1000;
+
+        for (var i = 0; i < times.length; i++) {
+            var t = times[i];
+            var v = s4Values[i];
+
+            // 检查当前点和上一个点的时间差
+            if (i > 0) {
+                var prevT = times[i - 1];
+                if (t - prevT > gapThreshold) {
+                    // 如果间隔过大，在中间插入一个 null 值来打断折线和面积图
+                    // 时间设置在上一个点稍微靠后一点点
+                    trendData.push([prevT + 1000, null]);
+                    thresholdData.push([prevT + 1000, null]);
+                }
+            }
+
+            // 时间轴的数据格式为 [时间, 数值]
+            trendData.push([t, v]);
+            thresholdData.push([t, 0.4]); // 对应的阈值线点
+        }
+
+        trendChart.setOption({
+            series: [
+                { data: trendData },
+                { data: thresholdData }
+            ]
+        });
+    }
+
+    // 实时更新数据（增强版，兼容各种数据格式）
+    function updateRealTimeData(s4DataList) {
+        console.log('收到实时数据，类型:', typeof s4DataList, s4DataList);
+
+        // 兼容处理：如果是字符串，先解析
+        if (typeof s4DataList === 'string') {
+            try {
+                s4DataList = JSON.parse(s4DataList);
+            } catch(e) {
+                console.error('解析数据字符串失败:', e);
+                return;
+            }
+        }
+
+        // 兼容处理：如果不是数组，转换为数组
+        if (!Array.isArray(s4DataList)) {
+            s4DataList = [s4DataList];
+        }
+
+        // 更新对应卫星的行数据
+        for (var i = 0; i < s4DataList.length; i++) {
+            var data = s4DataList[i];
+            if (!data) continue;
+
+            // 获取卫星标识
+            var stationId = data.stationId;
+            var satNo = data.satNo;
+
+            if (!stationId || !satNo) {
+                console.warn('数据缺少stationId或satNo:', data);
+                continue;
+            }
+
+            var row = $('#satTable_' + stationId + ' tr[data-sat-no="' + satNo + '"]');
+            if (row.length > 0) {
+                var levelCode = data.scintillationLevelCode || getLevelCode(data.s4Index || 0);
+                var levelInfo = levelMap[levelCode] || levelMap[0];
+                var barColor = getBarColor(data.s4Index || 0);
+                var s4Value = (data.s4Index || 0).toFixed(6);
+
+                // 更新S4值
+                row.find('td:eq(1)').html(s4Value +
+                    '<div class="s4-progress"><div class="s4-progress-bar ' + barColor + '" style="width:' + ((data.s4Index || 0) * 100) + '%"></div></div>');
+                // 更新等级
+                row.find('td:eq(2)').html('<span class="level-badge ' + levelInfo.class + '">' + levelInfo.name + '</span>');
+                // 更新时间
+                if (data.calcTime) {
+                    row.find('td:eq(4)').text(data.calcTime);
+                }
+                // 添加闪烁和高亮效果
+                row.addClass('data-updated');
+                setTimeout(function() {
+                    row.removeClass('data-updated');
+                }, 500);
+                row.addClass('blink');
+                setTimeout(function() {
+                    row.removeClass('blink');
+                }, 1000);
+            }
+        }
+
+        // 如果当前查看的卫星有更新，刷新详情
+        if (currentSatNo) {
+            var currentData = null;
+            for (var i = 0; i < s4DataList.length; i++) {
+                if (s4DataList[i] && s4DataList[i].satNo === currentSatNo) {
+                    currentData = s4DataList[i];
+                    break;
+                }
+            }
+            if (currentData) {
+                updateSatelliteDetail({
+                    stationId: currentData.stationId,
+                    satNo: currentData.satNo,
+                    currentS4: currentData.s4Index || 0,
+                    maxS4: currentData.s4Index || 0,
+                    avgS4: currentData.s4Index || 0
+                });
+                // 追加新数据点到图表
+                appendToChart(currentData.s4Index || 0);
+            }
+        }
+
+        // 刷新监测站概要数据
+        refreshStationData();
+    }
+
+    // 刷新监测站概要
+    function refreshStationData() {
+        $.ajax({
+            url: ctx + 'gnss/dashboard/stations/summary',
+            type: 'GET',
+            success: function(response) {
+                if (response.code === 0) {
+                    updateStationSummaries(response.data);
+                }
+            }
+        });
+    }
+
+    // 更新监测站概要
+    function updateStationSummaries(stations) {
+        for (var i = 0; i < stations.length; i++) {
+            var station = stations[i];
+            var card = $('.station-card[data-station-id="' + station.stationId + '"]');
+            if (card.length > 0) {
+                var statusClass = getStatusClass(station.status);
+                card.find('.station-status').removeClass().addClass('station-status ' + statusClass).text(station.status+'（点击可以展开/收起）');
+                card.find('.station-stats').html(
+                    '<span><i class="fa fa-satellite"></i> 卫星数: ' + station.satelliteCount + '</span>' +
+                    '<span><i class="fa fa-tachometer"></i> 最大S4: ' + station.maxS4.toFixed(4) + '</span>' +
+                    '<span><i class="fa fa-chart-line"></i> 平均S4: ' + station.avgS4.toFixed(4) + '</span>' +
+                    '<span class="warning-count"><i class="fa fa-exclamation-triangle"></i> 警告: ' + station.warningCount + '</span>' +
+                    '<span class="severe-count"><i class="fa fa-bell"></i> 严重: ' + station.severeCount + '</span>'
+                );
+            }
+        }
+    }
+
+    // 追加数据到图表
+    function appendToChart(s4Value) {
+        if (!trendChart) return;
+
+        var option = trendChart.getOption();
+        var s4Series = option.series[0].data || [];
+        var thresholdSeries = option.series[1].data || [];
+
+        // 使用当前时间的毫秒级时间戳
+        var nowTimestamp = new Date().getTime();
+
+        // 压入 [时间戳, 数值] 数组
+        s4Series.push([nowTimestamp, s4Value]);
+        thresholdSeries.push([nowTimestamp, 0.4]);
+
+        // 保持最多60个数据点，但在时间轴模式下，这取决于你的数据频率
+        if (s4Series.length > 120) {
+            s4Series.shift();
+            thresholdSeries.shift();
+        }
+
+        trendChart.setOption({
+            series: [
+                { data: s4Series },
+                { data: thresholdSeries }
+            ]
+        });
+    }
+
+    // 获取等级代码
+    function getLevelCode(s4) {
+        if (s4 < 0.2) return 0;
+        if (s4 < 0.4) return 1;
+        if (s4 < 0.6) return 2;
+        return 3;
+    }
+
+    // 获取等级颜色
+    function getLevelColor(s4) {
+        if (s4 < 0.2) return '#2ecc71';
+        if (s4 < 0.4) return '#3498db';
+        if (s4 < 0.6) return '#f39c12';
+        return '#e74c3c';
+    }
+
+    // 窗口大小改变时重绘图表
+    $(window).resize(function() {
+        if (trendChart) {
+            trendChart.resize();
+        }
+    });
+
+    // 页面关闭时断开WebSocket连接
+    $(window).on('beforeunload', function() {
+        if (stompClient && stompClient.connected) {
+            stompClient.disconnect();
+        }
+    });
+</script>
+</body>
+</html>

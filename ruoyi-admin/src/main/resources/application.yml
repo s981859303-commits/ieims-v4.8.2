@@ -1,5 +1,5 @@
 
-  # 项目相关配置
+# 项目相关配置
 ruoyi:
   # 自定义系统全称
   sysName: 电离层环境智能监测与服务系统
@@ -34,11 +34,6 @@ server:
       # Tomcat启动初始化的线程数，默认值10
       min-spare: 100
 
-# 日志配置
-logging:
-  level:
-    com.ruoyi: debug
-    org.springframework: warn
 
 # 用户配置
 user:
@@ -46,142 +41,81 @@ user:
     # 密码错误{maxRetryCount}次锁定10分钟
     maxRetryCount: 5
 
-  # =====================================================
-  # GNSS 模块配置文件
-  # =====================================================
+  #  # =====================================================
+  #  # GNSS 模块配置文件
+  #  # =====================================================
+  #
+  #gnss:
+  #  # ==================== MQTT 配置 ====================
+  #  mqtt:
+  #    # MQTT Broker 地址
+  #    broker: tcp://broker.emqx.io:1883
+  #    # 订阅主题（接收 GNSS 数据）
+  #    topic: /USER-G780s/update
+  #    # 客户端 ID 前缀
+  #    client-id-prefix: RuoYi_Client_
+  #    # 用户名（可选）
+  #    username:
+  #    # 密码（可选）
+  #    password:
+  #    # 连接超时时间（秒）
+  #    connection-timeout: 30
+  #    # 心跳间隔（秒）
+  #    keep-alive-interval: 60
+  #    # 最大重连次数
+  #    max-reconnect-attempts: 10
+  #    # 重连延迟（毫秒）
+  #    reconnect-delay: 5000
+  #    # QoS 级别
+  #    qos: 0
+  #    #TDengine 数据推送主题
+  #    tdengine-topic: ieims/ieims_data_topic
 
-gnss:
-  # ==================== MQTT 配置 ====================
-  mqtt:
-    # MQTT Broker 地址
-    broker: tcp://broker.emqx.io:1883
-    # 订阅主题（接收 GNSS 数据）
-    # 使用 + 通配符，代表匹配这一层级的任何字符串
-    # 配置多站点设置：topic: ieims/gnss/data/+        测试站点guet_test1
-    topic: /ieims/gnss/data/+
-    # 客户端 ID 前缀
-    client-id-prefix: RuoYi_Client_
-    # 用户名（可选）
-    username:
-    # 密码（可选）
-    password:
-    # 连接超时时间（秒）
-    connection-timeout: 30
-    # 心跳间隔（秒）
-    keep-alive-interval: 60
-    # 最大重连次数
-    max-reconnect-attempts: 10
-    # 重连延迟（毫秒）
-    reconnect-delay: 5000
-    # QoS 级别
-    qos: 0
-    #TDengine 数据推送主题
-    tdengine-topic: ieims/ieims_data_topic
 
-  # ==================== 解析器配置 ====================
-  parser:
-    # 缓冲区大小（字节）
-    buffer-size: 1048576
-    # 站点 ID
-    station-id: 8900_1
-    # NMEA 最大长度
-    max-nmea-length: 1000
-    # RTCM 最大长度
-    max-rtcm-length: 1200
-    # 打印间隔（毫秒）
-    print-interval-ms: 950
-
-  # ==================== TDengine 配置 ====================
-  tdengine:
-    # 是否启用 TDengine 直接写入
-    enabled: true
-    # 数据库名称
-    database: ieims # gnss_test_db
-    # 表名前缀
-    table-prefix: gnss_
-    # 驱动类名
-    driver-class-name: com.taosdata.jdbc.rs.RestfulDriver
-    # 连接URL
-    url: jdbc:TAOS-RS://127.0.0.1:6041/gnss_test_db
-    # 用户名
-    username: root
-    # 密码
-    password: Guet@90-=
-
-  # ==================== 异步处理配置 ====================
-  async:
-    queueSize: 10000
-    batchSize: 100
-    flushIntervalMs: 1000
-    consumerThreads: 2
-    backpressureThreshold: 0.8    # 队列使用率 80% 时触发背压
-    backpressureWaitMs: 10        # 背压等待时间
-
-  # ==================== 队列监控配置 ====================
-  monitor:
-    enabled: true
-    checkIntervalMs: 5000
-    warningThreshold: 0.6
-    criticalThreshold: 0.8
-    emergencyThreshold: 0.95
-    backlogWarningMs: 30000
-    backlogCriticalMs: 60000
-    speedCheckWindowMs: 10000
-    speedRatioWarning: 0.5
-    alertCooldownMs: 60000
-    recoveryNotifyEnabled: true
-    highUsageThreshold: 0.5
-    shutdownTimeoutSec: 5
-
-  # ==================== NMEA 存储配置 ====================
-  nmea:
-    batchSize: 100
-
-  # ==================== 数据融合配置 ====================
-  fusion:
-    intervalMs: 1000
-    epochTimeoutMs: 2000
-    cacheMaxSize: 10000
-
-  # ==================== GSV数据配置 ====================
-  gsv:
-    groupExpireMs: 15000       # 网络差，把GSV组包等待时间拉长到15秒
-    cleanupIntervalMs: 10000   # 降低清理频率，节省CPU
-    parser:
-      maxBufferSize: 131072      # 增大缓冲区到 128KB
-    rtklib:
-      maxObs: 100                # 支持更多卫星
-
-  # Spring配置
+# Spring配置
 spring:
   # 导入子模块的配置文件（支持多个，用逗号分隔）
   config:
     import:
       #  相对路径（子模块需在同一个项目下，路径从resources开始）
       - classpath:/application-user-comm.yml  # 假设子模块配置文件名为 application-user-comm.yml
-#  # redis 配置
-#  redis:
-#    # 地址
-#    host: localhost
-#    # 端口，默认为6379
-#    port: 6379
-#    # 数据库索引
-#    database: 0
-#    # 密码
-#    password: Guet@90-=
-#    #password:
-#    # 连接超时时间
-#    timeout: 10s
-#    lettuce:
-#      pool:
-#        # 连接池中的最小空闲连接
-#        min-idle: 0
-#        # 连接池中的最大空闲连接
-#        max-idle: 8
-#        # 连接池的最大数据库连接数
-#        max-active: 8
-#        # #连接池最大阻塞等待时间（使用负值表示没有限制）
-#        max-wait: -1ms
+  #  # redis 配置
+  #  redis:
+  #    # 地址
+  #    host: localhost
+  #    # 端口，默认为6379
+  #    port: 6379
+  #    # 数据库索引
+  #    database: 0
+  #    # 密码
+  #    password: Guet@90-=
+  #    #password:
+  #    # 连接超时时间
+  #    timeout: 10s
+  #    lettuce:
+  #      pool:
+  #        # 连接池中的最小空闲连接
+  #        min-idle: 0
+  #        # 连接池中的最大空闲连接
+  #        max-idle: 8
+  #        # 连接池的最大数据库连接数
+  #        max-active: 8
+  #        # #连接池最大阻塞等待时间（使用负值表示没有限制）
+  #        max-wait: -1ms
+
+  # 在 ruoyi-admin 的 application.yml 中确保
+  spring:
+    task:
+      scheduling:
+        pool:
+          size: 5
+
+  # TEC模块配置（可选）
+  tec:
+    min-elevation: 15
+    arc-window-minutes: 30
+    dcb-auto-download: true
+
   # 模板引擎
   thymeleaf:
     mode: HTML
@@ -264,7 +198,7 @@ shiro:
     # 是否开启记住我
     enabled: true
   # ===================== 新增：Shiro拦截规则（纯yml配置放行，与user/cookie同级） =====================
-  anon-paths: /ieims,/ieims-index.html,/ieims2
+  anon-paths: /ieims,/ieims-index.html,/ieims2,/ieims/rawdata/**
   # ======================================================================================================
 # 防止XSS攻击
 xss:
@@ -287,3 +221,107 @@ swagger:
   # 是否开启swagger
   enabled: true
 
+# 日志配置
+#logging:
+#  level:
+#    com.ruoyi: debug
+#    org.springframework: warn
+#    com.ruoyi.gnss.service: INFO
+
+logging:
+  level:
+    # 关闭 MyBatis 的 SQL 调试日志
+    com.ruoyi.ieims.gnss.mapper: warn
+    # 关闭所有 MyBatis 相关 DEBUG
+    org.mybatis: warn
+    java.sql: warn
+    # 关闭 MQTT 线程 DEBUG
+    com.ruoyi: info
+
+gnss:
+  # ==================== 解析器配置 ====================
+  parser:
+    # 缓冲区大小（字节）
+    buffer-size: 1048576
+    # 站点 ID
+    station-id: 8900_1
+    # NMEA 最大长度
+    max-nmea-length: 1000
+    # RTCM 最大长度
+    max-rtcm-length: 1200
+    # 打印间隔（毫秒）
+    print-interval-ms: 950
+# GNSS定时任务配置
+  schedule:
+    s4:
+      enabled: true          # 是否启用S4定时计算
+    websocket:
+      enabled: true          # 是否启用WebSocket推送
+    tdengine:
+      enabled: true          # 是否启用TDengine存储
+
+  # ==================== TDengine 配置 ====================
+  tdengine:
+    # 是否启用 TDengine 直接写入
+    enabled: false
+    # 数据库名称
+    database: ieims # gnss_test_db
+    # 表名前缀
+    table-prefix: gnss_
+    # 驱动类名
+    driver-class-name: com.taosdata.jdbc.rs.RestfulDriver
+    # 连接URL 10.12.1.211
+    #    url: jdbc:TAOS-RS://127.0.0.1:6041/gnss_test_db
+    url: jdbc:TAOS-RS://10.12.1.211:6041/gnss_test_db
+    # 用户名
+    username: root
+    # 密码
+    password: Guet@90-=
+
+  # ==================== 异步处理配置 ====================
+  async:
+    queueSize: 20000
+    batchSize: 100
+    flushIntervalMs: 1000
+    consumerThreads: 6            # 提升并发处理 JSON 序列化的能力 (例如 8 核服务器可设为 8)
+    backpressureThreshold: 0.8    # 队列使用率 80% 时触发背压
+    backpressureWaitMs: 10        # 背压等待时间
+    mqttPublishThreads: 20        # 调整专门发内网 MQTT 的异步线程数（如内网十分拥堵，可调至 50）
+  # ==================== 队列监控配置 ====================
+  monitor:
+    enabled: true
+    checkIntervalMs: 5000
+    warningThreshold: 0.6
+    criticalThreshold: 0.8
+    emergencyThreshold: 0.95
+    backlogWarningMs: 30000
+    backlogCriticalMs: 60000
+    speedCheckWindowMs: 10000
+    speedRatioWarning: 0.5
+    alertCooldownMs: 60000
+    recoveryNotifyEnabled: true
+    highUsageThreshold: 0.5
+    shutdownTimeoutSec: 5
+
+  # ==================== NMEA 存储配置 ====================
+  nmea:
+
+
+  # ==================== 数据融合配置 ====================
+  fusion:
+    intervalMs: 1000
+    epochTimeoutMs: 2000
+    cacheMaxSize: 10000
+
+  # ==================== GSV数据配置 ====================
+  gsv:
+    groupExpireMs: 15000       # 网络差，把GSV组包等待时间拉长到15秒
+    cleanupIntervalMs: 10000   # 降低清理频率，节省CPU
+    parser:
+      maxBufferSize: 131072      # 增大缓冲区到 128KB
+    rtklib:
+      maxObs: 100                # 支持更多卫星
+
+# WebSocket配置
+#websocket:
+#  path: /websocket

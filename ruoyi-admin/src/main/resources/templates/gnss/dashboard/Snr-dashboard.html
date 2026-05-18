@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="zh" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <th:block th:include="include :: header('载噪比(SNR)实时大屏')" />
+    <th:block th:include="include :: echarts-js" />
+    <script th:src="@{/js/websocket/sockjs.min.js}"></script>
+    <script th:src="@{/js/websocket/stomp.min.js}"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            background: #0a1a2f;
+            font-family: "Microsoft YaHei", Arial, sans-serif;
+            overflow-y: auto;
+            height: auto;
+            min-height: 100vh;
+        }
+
+        .dashboard-container {
+            width: 100%;
+            padding: 20px;
+            padding-bottom: 80px;
+            background: linear-gradient(135deg, #0a1a2f 0%, #0d2b3e 100%);
+            min-height: 100vh;
+        }
+
+        .dashboard-header {
+            text-align: center;
+            margin-bottom: 20px;
+            position: relative;
+        }
+        .dashboard-header h1 {
+            font-size: 32px;
+            color: #00d4ff;
+            text-shadow: 0 0 10px rgba(0,212,255,0.5);
+            letter-spacing: 4px;
+        }
+        .dashboard-header .subtitle {
+            color: #7f8fa4;
+            font-size: 14px;
+            margin-top: 8px;
+        }
+        .current-time {
+            position: absolute;
+            right: 20px;
+            top: 10px;
+            color: #00d4ff;
+            font-size: 16px;
+            background: rgba(0,0,0,0.4);
+            padding: 8px 16px;
+            border-radius: 20px;
+        }
+
+        .stats-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+        .stat-card {
+            flex: 1;
+            min-width: 160px;
+            background: linear-gradient(135deg, rgba(15,40,60,0.95), rgba(10,30,50,0.95));
+            border-radius: 12px;
+            border: 1px solid rgba(0,212,255,0.3);
+            padding: 15px;
+            text-align: center;
+        }
+        .stat-card h4 { color: #7f8fa4; font-size: 14px; margin-bottom: 8px; }
+        .stat-card .number { font-size: 36px; font-weight: bold; color: #00d4ff; }
+        .stat-card .unit { font-size: 12px; color: #7f8fa4; margin-top: 5px; }
+
+        .chart-container {
+            background: linear-gradient(135deg, rgba(15,40,60,0.95), rgba(10,30,50,0.95));
+            border-radius: 12px;
+            border: 1px solid rgba(0,212,255,0.3);
+            padding: 20px;
+            margin-bottom: 30px;
+            min-height: 500px;
+        }
+
+        /* 过滤按钮样式 */
+        .filter-controls {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .filter-btn {
+            padding: 10px 25px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            border: 1px solid rgba(0,212,255,0.5);
+            background: rgba(0,212,255,0.05);
+            color: #00d4ff;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            user-select: none;
+        }
+        .filter-btn.active {
+            background: rgba(0,212,255,0.25);
+            color: #fff;
+            border-color: #00d4ff;
+            box-shadow: 0 0 15px rgba(0,212,255,0.3);
+        }
+        .filter-btn i { font-size: 14px; }
+
+        #snrChart {
+            width: 100%;
+            height: 550px;
+        }
+
+        .footer-copyright {
+            text-align: center;
+            color: #5a6e8a;
+            font-size: 12px;
+            padding: 20px 0;
+            border-top: 1px solid rgba(0,212,255,0.2);
+            margin-top: 20px;
+        }
+
+        .ws-status {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            padding: 6px 12px;
+            background: rgba(0,0,0,0.7);
+            border-radius: 20px;
+            font-size: 12px;
+            z-index: 1000;
+        }
+        .ws-connected { color: #2ecc71; }
+        .ws-disconnected { color: #e74c3c; }
+
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #1a2a3a; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb { background: #00d4ff; border-radius: 4px; }
+    </style>
+</head>
+<body>
+<div class="dashboard-container">
+    <div class="dashboard-header">
+        <h1>载噪比(SNR)实时监测大屏</h1>
+        <div class="subtitle">卫星信号质量 · 载噪比实时显示 (dB-Hz)</div>
+        <div class="current-time" id="currentTime"></div>
+    </div>
+
+    <div class="stats-row">
+        <div class="stat-card"><h4>总卫星数</h4><div class="number" id="totalCount">0</div></div>
+        <div class="stat-card"><h4>BDS卫星数</h4><div class="number" id="bdsCount">0</div></div>
+        <div class="stat-card"><h4>GPS卫星数</h4><div class="number" id="gpsCount">0</div></div>
+        <div class="stat-card"><h4>平均SNR</h4><div class="number" id="avgSnr">0</div><div class="unit">dB-Hz</div></div>
+        <div class="stat-card"><h4>Top4平均SNR</h4><div class="number" id="top4Avg">0</div><div class="unit">dB-Hz</div></div>
+    </div>
+
+    <div class="chart-container">
+        <div class="filter-controls">
+            <div id="btnBDS" class="filter-btn active" onclick="toggleSystem('BDS')">
+                <i class="fa fa-toggle-on"></i> 北斗系统 (BDS)
+            </div>
+            <div id="btnGPS" class="filter-btn active" onclick="toggleSystem('GPS')">
+                <i class="fa fa-toggle-on"></i> GPS 系统
+            </div>
+        </div>
+        <div id="snrChart"></div>
+    </div>
+
+    <div class="footer-copyright">
+        Copyright © 2025-2028 All Rights Reserved.
+    </div>
+
+    <div class="ws-status">
+        <i class="fa fa-plug"></i> WebSocket状态: <span id="wsStatus" class="ws-disconnected">连接中...</span>
+    </div>
+</div>
+
+<th:block th:include="include :: footer" />
+<script th:inline="javascript">
+    var ctx = /*[[@{/}]]*/ '';
+    var stompClient = null;
+    var snrMap = new Map();
+    var chart = null;
+
+    // 过滤状态开关
+    var showBDS = true;
+    var showGPS = true;
+
+    function initTime() {
+        var update = function() {
+            var now = new Date();
+            $('#currentTime').text(now.toLocaleString('zh-CN'));
+        };
+        update();
+        setInterval(update, 1000);
+    }
+
+    function getSatSystem(satNo) {
+        if (!satNo) return 'Other';
+        var first = satNo.charAt(0);
+        if (first === 'C') return 'BDS';
+        if (first === 'G') return 'GPS';
+        return 'Other';
+    }
+
+    // 切换系统显示
+    function toggleSystem(sys) {
+        if (sys === 'BDS') {
+            showBDS = !showBDS;
+            $('#btnBDS').toggleClass('active');
+            $('#btnBDS i').toggleClass('fa-toggle-on fa-toggle-off');
+        } else if (sys === 'GPS') {
+            showGPS = !showGPS;
+            $('#btnGPS').toggleClass('active');
+            $('#btnGPS i').toggleClass('fa-toggle-on fa-toggle-off');
+        }
+        updateChart(); // 立即触发重绘动画
+    }
+
+    function updateStatistics() {
+        var allSats = Array.from(snrMap.keys());
+        // 统计卡片只计算当前处于“激活”状态的卫星
+        var sats = allSats.filter(function(sat) {
+            var sys = getSatSystem(sat);
+            if (sys === 'BDS' && !showBDS) return false;
+            if (sys === 'GPS' && !showGPS) return false;
+            return true;
+        });
+
+        var total = sats.length;
+        if (total === 0) {
+            $('#totalCount').text(0); $('#bdsCount').text(0); $('#gpsCount').text(0);
+            $('#avgSnr').text('0'); $('#top4Avg').text('0');
+            return;
+        }
+
+        var bdsCount = 0, gpsCount = 0, validSnrValues = [];
+        for (var sat of sats) {
+            var sys = getSatSystem(sat);
+            if (sys === 'BDS') bdsCount++;
+            if (sys === 'GPS') gpsCount++;
+            validSnrValues.push(snrMap.get(sat).snr || 0);
+        }
+
+        var sum = validSnrValues.reduce((a,b) => a+b, 0);
+        var avg = Math.round(sum / total);
+        var sorted = validSnrValues.slice().sort((a,b) => b - a);
+        var top4Avg = Math.round(sorted.slice(0,4).reduce((a,b) => a+b, 0) / Math.min(4, total));
+
+        $('#totalCount').text(total);
+        $('#bdsCount').text(bdsCount);
+        $('#gpsCount').text(gpsCount);
+        $('#avgSnr').text(avg);
+        $('#top4Avg').text(top4Avg);
+    }
+
+    function initChart() {
+        chart = echarts.init(document.getElementById('snrChart'));
+        chart.setOption({
+            title: { text: '实时卫星载噪比 (SNR) - 专业监测', left: 'center', textStyle: { color: '#00d4ff' } },
+            legend: {
+                data: ['频点1 (L1/B1)', '频点2 (L2/B2)'],
+                top: 30,
+                textStyle: { color: '#b0c4de' }
+            },
+            tooltip: {
+                trigger: 'axis',
+                axisPointer: { type: 'shadow' },
+                backgroundColor: 'rgba(10, 26, 47, 0.9)',
+                borderColor: '#00d4ff',
+                textStyle: { color: '#fff' },
+                formatter: function(params) {
+                    if (!params || params.length === 0) return '';
+                    var satNo = params[0].name;
+                    var sys = getSatSystem(satNo);
+                    var f1Name = sys === 'BDS' ? 'B1I' : 'L1 C/A';
+                    var f2Name = sys === 'BDS' ? 'B2I' : 'L2C';
+                    var html = '<div style="font-weight:bold;border-bottom:1px solid rgba(255,255,255,0.2);padding-bottom:5px;margin-bottom:5px;">卫星: ' + satNo + '</div>';
+                    params.forEach(p => {
+                        var name = p.seriesIndex === 0 ? f1Name : f2Name;
+                        var val = p.value === 0 ? '<span style="color:#e74c3c;">无信号</span>' : p.value + ' dB-Hz';
+                        html += '<div>' + p.marker + ' ' + name + ': <span style="color:#00d4ff;font-weight:bold;">' + val + '</span></div>';
+                    });
+                    return html;
+                }
+            },
+            grid: { containLabel: true, bottom: 50, top: 80, left: 50, right: 30 },
+            xAxis: {
+                type: 'category',
+                data: [],
+                axisLabel: { color: '#b0c4de', rotate: 45, interval: 0 },
+                axisLine: { lineStyle: { color: '#00d4ff' } }
+            },
+            yAxis: {
+                type: 'value',
+                name: 'dB-Hz',
+                min: 0, max: 60,
+                nameTextStyle: { color: '#b0c4de' },
+                axisLabel: { color: '#b0c4de' },
+                splitLine: { lineStyle: { color: 'rgba(255,255,255,0.1)' } }
+            },
+            animationDurationUpdate: 500, // 关键：控制切换时的流畅度
+            series: [
+                {
+                    name: '频点1 (L1/B1)',
+                    type: 'bar',
+                    barGap: '0%',
+                    itemStyle: {
+                        color: function(p) {
+                            return p.name.startsWith('C') ? '#5470c6' : '#fac858';
+                        }
+                    },
+                    data: [],
+                    label: { show: true, position: 'top', color: '#fff', fontSize: 10 }
+                },
+                {
+                    name: '频点2 (L2/B2)',
+                    type: 'bar',
+                    itemStyle: {
+                        color: function(p) {
+                            return p.name.startsWith('C') ? '#a5b8e1' : '#f9e2af';
+                        }
+                    },
+                    data: [],
+                    label: { show: true, position: 'top', color: '#fff', fontSize: 10 }
+                }
+            ]
+        });
+    }
+
+    function updateChart() {
+        if (!chart) return;
+
+        // 过滤数据逻辑
+        var allSats = Array.from(snrMap.keys());
+        var filteredSats = allSats.filter(function(sat) {
+            var sys = getSatSystem(sat);
+            if (sys === 'BDS' && !showBDS) return false;
+            if (sys === 'GPS' && !showGPS) return false;
+            return true;
+        });
+
+        // 排序
+        filteredSats.sort(function(a, b) {
+            var regex = /([A-Z]+)(\d+)/;
+            var ma = a.match(regex), mb = b.match(regex);
+            if (ma && mb) {
+                if (ma[1] !== mb[1]) return ma[1].localeCompare(mb[1]);
+                return parseInt(ma[2]) - parseInt(mb[2]);
+            }
+            return a.localeCompare(b);
+        });
+
+        var snrData = filteredSats.map(s => Math.round(snrMap.get(s).snr));
+        var snr2Data = filteredSats.map(s => Math.round(snrMap.get(s).snr2));
+
+        chart.setOption({
+            xAxis: { data: filteredSats },
+            series: [ { data: snrData }, { data: snr2Data } ]
+        });
+
+        updateStatistics();
+    }
+
+    function onMessage(message) {
+        try {
+            var msg = JSON.parse(message.body);
+            if (msg.msgType === 'snr_batch') {
+                var batchArray = JSON.parse(msg.extraData);
+                if (Array.isArray(batchArray)) {
+                    batchArray.forEach(function(item) {
+                        if (item.satNo) {
+                            snrMap.set(item.satNo, {
+                                snr: item.snr || 0,
+                                snr2: item.snr2 || 0
+                            });
+                        }
+                    });
+                    updateChart();
+                }
+            }
+        } catch(e) { console.error(e); }
+    }
+
+    function connectWebSocket() {
+        var socket = new SockJS(ctx + 'ws/connect');
+        stompClient = Stomp.over(socket);
+        stompClient.debug = null;
+        stompClient.connect({}, function() {
+            $('#wsStatus').text('已连接').removeClass('ws-disconnected').addClass('ws-connected');
+            stompClient.subscribe('/topic/snr', onMessage);
+        }, function(error) {
+            $('#wsStatus').text('连接失败').removeClass('ws-connected').addClass('ws-disconnected');
+            setTimeout(connectWebSocket, 5000);
+        });
+    }
+
+    $(function() {
+        initTime();
+        initChart();
+        connectWebSocket();
+        $(window).resize(function() { if (chart) chart.resize(); });
+    });
+</script>
+</body>
+</html>

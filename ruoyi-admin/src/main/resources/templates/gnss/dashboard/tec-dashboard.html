@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="zh" xmlns:th="http://www.thymeleaf.org" xmlns:shiro="http://www.pollix.at/thymeleaf/shiro">
+<head>
+    <th:block th:include="include :: header('TEC电离层监测大屏')" />
+    <th:block th:include="include :: echarts-js" />
+    <style>
+        .tec-card { border-radius: 6px; background: #fff; padding: 15px; margin-bottom: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.08); }
+        .tec-value { font-size: 28px; font-weight: bold; color: #1ab394; }
+        .tec-label { color: #999; font-size: 12px; }
+        .quality-good { color: #1ab394; }
+        .quality-suspect { color: #f8ac59; }
+        .quality-relative { color: #ed5565; }
+        .station-selector { background: #fff; padding: 10px 15px; border-radius: 6px; margin-bottom: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.08); }
+    </style>
+</head>
+<body class="gray-bg">
+<div class="wrapper wrapper-content animated fadeInRight">
+
+    <div class="row">
+        <div class="col-sm-12">
+            <div class="station-selector">
+                <form class="form-inline">
+                    <div class="form-group">
+                        <label for="stationSelect" style="margin-right: 10px;">当前监测站点：</label>
+                        <select id="stationSelect" class="form-control" onchange="onStationChange()">
+                            <option value="guet_test2" selected>桂林电子科大测试站 (guet_test2)</option>
+                            <option value="ST001">测试站点 1 (ST001)</option>
+                            <option value="ST002">测试站点 2 (ST002)</option>
+                        </select>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col-sm-3">
+            <div class="tec-card">
+                <div class="tec-label">当前VTEC均值 (TECU)</div>
+                <div class="tec-value" id="avgVtec">--</div>
+            </div>
+        </div>
+        <div class="col-sm-3">
+            <div class="tec-card">
+                <div class="tec-label">可用卫星数</div>
+                <div class="tec-value" id="satCount">--</div>
+            </div>
+        </div>
+        <div class="col-sm-3">
+            <div class="tec-card">
+                <div class="tec-label">DCB校正状态</div>
+                <div class="tec-value" id="dcbStatus" style="font-size: 18px; padding-top: 8px;">--</div>
+            </div>
+        </div>
+        <div class="col-sm-3">
+            <div class="tec-card">
+                <div class="tec-label">数据质量</div>
+                <div class="tec-value" id="qualityStatus" style="font-size: 18px; padding-top: 8px;">--</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col-sm-12">
+            <div class="tec-card">
+                <div id="tecChart" style="height: 450px;"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="row">
+        <div class="col-sm-12">
+            <div class="tec-card">
+                <table id="bootstrap-table" class="table table-striped table-hover"></table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<th:block th:include="include :: footer" />
+
+<script th:src="@{/js/websocket/sockjs.min.js}"></script>
+<script th:src="@{/js/websocket/stomp.min.js}"></script>
+
+<script th:inline="javascript">
+    var prefix = ctx + "gnss/tec";
+
+    // 全局变量管理
+    var currentStationId = "";
+    var stompClient = null;
+    var currentSubscription = null;
+
+    // 初始化 ECharts
+    var tecChart = echarts.init(document.getElementById('tecChart'));
+    var tecOption = {
+        title: { text: 'VTEC 实时监测曲线', left: 'center' },
+        tooltip: { trigger: 'axis' },
+        legend: { data: ['VTEC'], bottom: 0 },
+        grid: { left: '3%', right: '4%', bottom: '10%', containLabel: true },
+        xAxis: { type: 'time', boundaryGap: false, name: '时间' },
+        yAxis: { type: 'value', name: 'TECU', min: 0 },
+        series: [{
+            name: 'VTEC',
+            type: 'line',
+            smooth: true,
+            data: [],
+            itemStyle: { color: '#1ab394' },
+            areaStyle: { color: 'rgba(26,179,148,0.2)' }
+        }]
+    };
+    tecChart.setOption(tecOption);
+
+    // 核心函数 1：加载指定站点的历史/最新数据
+    function loadLatestData(stationId) {
+        if (!stationId) return;
+
+        $.get(prefix + "/latest", { stationId: stationId, limit: 200 }, function(result) {
+            // 增加完整的异常处理与日志，避免控制台“静音”
+            if (result.code !== 0) {
+                console.error("获取TEC数据失败：", result.msg);
+                return;
+            }
+            if (!result.data || result.data.length === 0) {
+                console.warn("当前查询的站点暂无数据：", stationId);
+                // 无数据时清空界面
+                updateChart([]);
+                updateStats([]);
+                updateTable([]);
+                return;
+            }
+
+            var data = result.data;
+            updateChart(data);
+            updateStats(data);
+            updateTable(data);
+        });
+    }
+
+    // 核心函数 2：建立 WebSocket 连接
+    function connectWebSocket() {
+        // 【关键】路径必须包含 /connect，且必须以 ctx 开头以自动适配 context-path
+        var wsUrl = ctx + "ws/connect";
+
+        var socket = new SockJS(wsUrl);
+        stompClient = Stomp.over(socket);
+        stompClient.debug = null; // 关闭底层的控制台日志输出
+
+        stompClient.connect({}, function (frame) {
+            console.log('TEC WebSocket 成功连接到端点: /ws/connect');
+            // 连接成功后，立即订阅当前站点的频道
+            subscribeToStation(currentStationId);
+        }, function(error) {
+            console.error("WebSocket 无法连接到服务器，5秒后重连...");
+            setTimeout(connectWebSocket, 5000);
+        });
+    }
+
+    // 核心函数 3：订阅指定站点
+    function subscribeToStation(stationId) {
+        if (!stompClient || !stompClient.connected) return;
+
+        // 如果之前订阅了旧站点，先取消订阅
+        if (currentSubscription) {
+            currentSubscription.unsubscribe();
+            console.log("已取消订阅旧站点: " + currentStationId);
+        }
+
+        currentStationId = stationId;
+        var topic = '/topic/gnss/tec/' + stationId;
+
+        currentSubscription = stompClient.subscribe(topic, function (message) {
+            var msgObj = JSON.parse(message.body);
+            if (msgObj.extraData) {
+                console.log("收到新数据推送触发更新！");
+                // 收到新推送时，为了保证图表、表格、卡片数据的一致性和准确性，
+                // 直接调用 loadLatestData 重新拉取一次最新数据刷新界面。
+                // 这样写对于非前端开发人员最稳定，不容易出现数组错位 Bug。
+                loadLatestData(currentStationId);
+            }
+        });
+        console.log("已成功订阅新站点: " + stationId);
+    }
+
+    // 核心函数 4：处理下拉框切换事件
+    function onStationChange() {
+        var newStationId = $("#stationSelect").val();
+        if (!newStationId || newStationId === currentStationId) {
+            return;
+        }
+
+        console.log("准备切换到站点：" + newStationId);
+        currentStationId = newStationId;
+
+        // 1. 清空并加载新站点的历史数据
+        loadLatestData(newStationId);
+
+        // 2. 切换 WebSocket 监听通道
+        subscribeToStation(newStationId);
+    }
+
+    // --- 以下为原有的 UI 渲染更新函数 ---
+
+    function updateChart(data) {
+        var seriesData = [];
+        for (var i = data.length - 1; i >= 0; i--) {
+            var row = data[i];
+            seriesData.push([new Date(row.ts), row.vtec]);
+        }
+        tecChart.setOption({ series: [{ data: seriesData }] });
+    }
+
+    function updateStats(data) {
+        if (!data || data.length === 0) {
+            document.getElementById('avgVtec').innerText = '--';
+            document.getElementById('satCount').innerText = '0';
+            document.getElementById('dcbStatus').innerText = '--';
+            document.getElementById('qualityStatus').innerText = '--';
+            return;
+        }
+
+        var goodCount = 0, suspectCount = 0, relativeCount = 0;
+        var sumVtec = 0, validCount = 0;
+        var dcbCorrected = false;
+
+        for (var i = 0; i < data.length; i++) {
+            var row = data[i];
+            if (row.vtec != null) {
+                sumVtec += row.vtec;
+                validCount++;
+            }
+            if (row.qualityFlag === 'GOOD') {
+                goodCount++;
+            } else if (row.qualityFlag === 'SUSPECT') {
+                suspectCount++;
+            } else if (row.qualityFlag === 'RELATIVE') {
+                relativeCount++;
+            }
+            if (row.dcbCorrected) {
+                dcbCorrected = true;
+            }
+        }
+        document.getElementById('avgVtec').innerText = validCount > 0 ? (sumVtec / validCount).toFixed(2) : '--';
+        document.getElementById('satCount').innerText = data.length;
+        document.getElementById('dcbStatus').innerText = dcbCorrected ? '绝对TEC模式' : '相对TEC模式';
+
+        var qStatus = document.getElementById('qualityStatus');
+        if (goodCount > suspectCount && goodCount > relativeCount) {
+            qStatus.innerText = '优';
+            qStatus.className = 'quality-good';
+        } else if (suspectCount > relativeCount) {
+            qStatus.innerText = '良';
+            qStatus.className = 'quality-suspect';
+        } else {
+            qStatus.innerText = '相对';
+            qStatus.className = 'quality-relative';
+        }
+    }
+
+    function updateTable(data) {
+        $('#bootstrap-table').bootstrapTable('destroy').bootstrapTable({
+            data: data,
+            columns: [
+                { field: 'ts', title: '时间', formatter: function(v) { return v ? new Date(v).toLocaleString() : '-'; } },
+                { field: 'satNo', title: '卫星' },
+                { field: 'vtec', title: 'VTEC(TECU)', formatter: function(v) { return v != null ? v.toFixed(2) : '-'; } },
+                { field: 'stec', title: 'STEC(TECU)', formatter: function(v) { return v != null ? v.toFixed(2) : '-'; } },
+                { field: 'qualityFlag', title: '质量', formatter: function(v) {
+                        if (v === 'GOOD') return '<span class="label label-primary">优</span>';
+                        if (v === 'SUSPECT') return '<span class="label label-warning">良</span>';
+                        return '<span class="label label-danger">相对</span>';
+                    }},
+                { field: 'validEpochCount', title: '有效历元' },
+                { field: 'slipCount', title: '周跳次数' }
+            ]
+        });
+    }
+
+    // 页面加载完毕后的启动入口
+    $(function() {
+        // 获取下拉框默认值（guet_test2）
+        currentStationId = $("#stationSelect").val();
+
+        // 1. 首次加载 Ajax 数据
+        loadLatestData(currentStationId);
+
+        // 2. 启动 WebSocket 监听（取代了之前的 setInterval 轮询）
+        connectWebSocket();
+    });
+
+</script>
+</body>
+</html>

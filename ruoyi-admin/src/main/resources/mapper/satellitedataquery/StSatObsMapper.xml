@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.ieims.satellitedataquery.mapper.StSatObsMapper">
+
+    <resultMap type="com.ruoyi.ieims.satellitedataquery.domain.StSatObs" id="StSatObsResult">
+        <result property="ts"                column="ts"/>
+        <result property="obsUniqueKey"      column="obs_unique_key"/>
+        <result property="dataSource"        column="data_source"/>
+        <result property="isComplete"        column="is_complete"/>
+        <result property="localTimestamp"    column="local_timestamp"/>
+        <result property="dateSource"        column="date_source"/>
+        <result property="dateFromZda"       column="date_from_zda"/>
+        <result property="observationTime"   column="observation_time"/>
+        <result property="elevation"         column="elevation"/>
+        <result property="azimuth"           column="azimuth"/>
+        <result property="snr"               column="snr"/>
+        <result property="pseudorangeP1"     column="pseudorange_p1"/>
+        <result property="pseudorangeP2"     column="pseudorange_p2"/>
+        <result property="phaseL1"           column="phase_l1"/>
+        <result property="phaseP2"           column="phase_p2"/>
+        <result property="c1"                column="c1"/>
+        <result property="c2"                column="c2"/>
+        <result property="stationId"         column="station_id"/>
+        <result property="satNo"             column="sat_no"/>
+        <result property="satSystem"         column="sat_system"/>
+    </resultMap>
+
+    <!-- 从TDengine查询卫星观测数据 -->
+    <select id="selectStSatObsList" parameterType="java.util.Map" resultMap="StSatObsResult">
+        SELECT
+        ts,
+        obs_unique_key,
+        data_source,
+        is_complete,
+        local_timestamp,
+        date_source,
+        date_from_zda,
+        observation_time,
+        elevation,
+        azimuth,
+        snr,
+        pseudorange_p1,
+        pseudorange_p2,
+        phase_l1,
+        phase_p2,
+        c1,
+        c2,
+        station_id,
+        sat_no,
+        sat_system
+        FROM st_sat_obs
+        WHERE station_id = #{stationId}
+        <if test="satNo != null and satNo != ''">
+            AND sat_no = #{satNo}
+        </if>
+        <if test="dataSource != null and dataSource != ''">
+            AND data_source = #{dataSource}
+        </if>
+        <if test="dateSource != null and dateSource != ''">
+            AND date_source = #{dateSource}
+        </if>
+        <if test="startTime != null">
+            AND ts >= #{startTime}
+        </if>
+        <if test="endTime != null">
+            AND ts &lt;= #{endTime}
+        </if>
+        ORDER BY ts DESC
+        LIMIT ${limit}
+    </select>
+
+    <!-- 保存查询记录到MySQL -->
+    <insert id="insertQueryRecord" parameterType="java.util.Map" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO ieims_st_sat_obs (
+            query_params,
+            result_count,
+            query_duration,
+            station_id,
+            sat_no,
+            data_source,
+            date_source,
+            start_time,
+            end_time,
+            limit_num,
+            is_realtime,
+            create_by,
+            create_time,
+            remark
+        ) VALUES (
+                     #{queryParams},
+                     #{resultCount},
+                     #{queryDuration},
+                     #{stationId},
+                     #{satNo},
+                     #{dataSource},
+                     #{dateSource},
+                     #{startTime},
+                     #{endTime},
+                     #{limitNum},
+                     #{isRealtime},
+                     #{createBy},
+                     sysdate(),
+                     #{remark}
+                 )
+    </insert>
+
+</mapper>

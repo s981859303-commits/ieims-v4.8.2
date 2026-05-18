@@ -7,7 +7,7 @@ spring:
             # 主库数据源
             master:
 #                url: jdbc:mysql://localhost:3306/ieims?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=true&serverTimezone=GMT%2B8
-                url: jdbc:mysql://10.60.117.10:3306/ieims?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=true&serverTimezone=GMT%2B8
+                url: jdbc:mysql://10.12.1.211:3306/ieims?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=true&serverTimezone=GMT%2B8
                 username: root
                 password: Guet@90-=
 #                password: bdgps@123

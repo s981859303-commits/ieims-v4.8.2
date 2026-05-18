@@ -51,6 +51,11 @@ public class IonosphereDataService {
             tdengineUtil.executeDDL(createStableSql);
             log.info("✅ 执行SQL成功：{}", createStableSql);
 
+            // 4. 创建GNSS卫星数据超级表
+              createStableSql = "CREATE STABLE IF NOT EXISTS satellite_data (ts TIMESTAMP, obs_unique_key VARCHAR(64), sat_no VARCHAR(16), sat_system VARCHAR(16), data_source VARCHAR(16), complete TINYINT, epoch_time BIGINT, recv_time BIGINT, date_source VARCHAR(16), date_from_zda TINYINT, observation_time VARCHAR(32), elevation DOUBLE, azimuth DOUBLE, snr DOUBLE, pseudorange_p1 DOUBLE, pseudorange_p2 DOUBLE, phase_l1 DOUBLE, phase_p2 DOUBLE, c1 VARCHAR(8), c2 VARCHAR(8)) TAGS (station_id VARCHAR(32));";
+            tdengineUtil.executeDDL(createStableSql);
+            log.info("✅ 执行SQL成功：{}", createStableSql);
+
             // 4. 创建子表（已切换数据库，无需带库名前缀）
             String createTableSql ="CREATE TABLE IF NOT EXISTS device_01  USING device_data TAGS (1, '华北', '电离层监测')";
             tdengineUtil.executeDDL(createTableSql);

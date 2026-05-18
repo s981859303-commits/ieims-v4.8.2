@@ -49,7 +49,8 @@
 				    </div>
             	</li>
                 <li>
-                    <a class="menuItem" th:href="@{/system/main}"><i class="fa fa-home"></i> <span class="nav-label">首页</span> </a>
+<!--					<a class="menuItem" th:href="@{/system/main}"><i class="fa fa-home"></i> <span class="nav-label">首页</span> </a>-->
+					<a class="menuItem" th:href="@{/gnss/dashboard/index-s4}"><i class="fa fa-home"></i> <span class="nav-label">首页</span> </a>
                 </li>
                 <li th:each="menu : ${menus}">
                 	<a th:class="@{${!#strings.isEmpty(menu.url) && menu.url != '#'} ? ${menu.target}}" th:href="@{${#strings.isEmpty(menu.url)} ? |#| : ${menu.url}}" th:data-refresh="${menu.isRefresh == '0'}">
@@ -239,7 +240,8 @@
             </button>
             <nav class="page-tabs menuTabs">
                 <div class="page-tabs-content">
-                    <a href="javascript:;" class="menuTab" th:data-id="@{/system/main}">首页</a>
+<!--					<a href="javascript:;" class="menuTab" th:data-id="@{/system/main}">首页</a>-->
+					<a href="javascript:;" class="menuTab" th:data-id="@{/gnss/dashboard/index-s4}">首页</a>
                 </div>
             </nav>
             <button class="roll-nav roll-right tabRight">
@@ -251,8 +253,10 @@
         <a id="ax_close_max" class="ax_close_max" href="javascript:;" title="关闭全屏"> <i class="fa fa-times-circle-o"></i> </a>
 
         <div class="row mainContent" id="content-main" th:classappend="${mainClass}">
-            <iframe class="RuoYi_iframe" name="iframe0" width="100%" height="100%" th:data-id="@{/system/main}"
-                th:src="@{/system/main}" frameborder="0" seamless></iframe>
+<!--			<iframe class="RuoYi_iframe" name="iframe0" width="100%" height="100%" th:data-id="@{/system/main}"-->
+<!--					th:src="@{/system/main}" frameborder="0" seamless></iframe>-->
+			<iframe class="RuoYi_iframe" name="iframe0" width="100%" height="100%" th:data-id="@{/gnss/dashboard/index-s4}"
+					th:src="@{/gnss/dashboard/index-s4}" frameborder="0" seamless></iframe>
         </div>
 
         <div th:if="${footer}" class="footer">

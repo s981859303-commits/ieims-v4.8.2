@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.ieims.gnss.mapper.GnssStationMapper">
+
+    <!-- 这里必须写全类名 -->
+    <resultMap type="com.ruoyi.ieims.gnss.domain.GnssStation" id="GnssStationResult">
+        <id     property="id"           column="id"           />
+        <result property="stationId"    column="station_id"   />
+        <result property="stationName"  column="station_name" />
+        <result property="longitude"    column="longitude"    />
+        <result property="latitude"     column="latitude"     />
+        <result property="altitude"     column="altitude"     />
+        <result property="logo"         column="logo"         />
+        <result property="deptId"       column="dept_id"      />
+        <result property="manager"      column="manager"      />
+        <result property="contact"      column="contact"      />
+        <result property="phone"        column="phone"        />
+        <result property="enableFlag"   column="enable_flag"  />
+        <result property="onlineStatus" column="online_status"/>
+        <result property="lastOnlineTime" column="last_online_time"/>
+        <result property="remark"       column="remark"       />
+        <result property="createBy"     column="create_by"    />
+        <result property="createTime"   column="create_time"  />
+        <result property="updateBy"     column="update_by"    />
+        <result property="updateTime"   column="update_time"  />
+        <result property="delFlag"      column="del_flag"     />
+    </resultMap>
+
+    <sql id="selectGnssStationVo">
+        select id, station_id, station_name, longitude, latitude, altitude, logo, dept_id, manager, contact, phone, enable_flag, online_status, last_online_time, remark, create_by, create_time, update_by, update_time, del_flag from ieims_gnss_station
+    </sql>
+
+    <select id="selectGnssStationById" parameterType="Long" resultMap="GnssStationResult">
+        <include refid="selectGnssStationVo"/>
+        where id = #{id} and del_flag = '0'
+    </select>
+
+    <select id="selectGnssStationByStationId" parameterType="String" resultMap="GnssStationResult">
+        <include refid="selectGnssStationVo"/>
+        where station_id = #{stationId} and del_flag = '0'
+    </select>
+
+    <select id="selectGnssStationList" parameterType="com.ruoyi.ieims.gnss.domain.GnssStation" resultMap="GnssStationResult">
+        <include refid="selectGnssStationVo"/>
+        where del_flag = '0'
+        <if test="stationId != null and stationId != ''">
+            and station_id like concat('%', #{stationId}, '%')
+        </if>
+        <if test="stationName != null and stationName != ''">
+            and station_name like concat('%', #{stationName}, '%')
+        </if>
+        <if test="deptId != null">
+            and dept_id = #{deptId}
+        </if>
+        <if test="enableFlag != null and enableFlag != ''">
+            and enable_flag = #{enableFlag}
+        </if>
+        <if test="onlineStatus != null and onlineStatus != ''">
+            and online_status = #{onlineStatus}
+        </if>
+        order by create_time desc
+    </select>
+
+    <insert id="insertGnssStation" parameterType="com.ruoyi.ieims.gnss.domain.GnssStation" useGeneratedKeys="true" keyProperty="id">
+        insert into ieims_gnss_station
+        (
+            station_id, station_name, longitude, latitude, altitude,
+            logo, dept_id, manager, contact, phone, enable_flag,
+            online_status, last_online_time, remark, create_by,
+            create_time, update_by, update_time, del_flag
+        )
+        values
+            (
+                #{stationId}, #{stationName}, #{longitude}, #{latitude}, #{altitude},
+                #{logo}, #{deptId}, #{manager}, #{contact}, #{phone}, #{enableFlag},
+                #{onlineStatus}, #{lastOnlineTime}, #{remark}, #{createBy},
+                #{createTime}, #{updateBy}, #{updateTime}, #{delFlag}
+            )
+    </insert>
+
+    <update id="updateGnssStation" parameterType="com.ruoyi.ieims.gnss.domain.GnssStation">
+        update ieims_gnss_station
+        <set>
+            station_name = #{stationName},
+            longitude = #{longitude},
+            latitude = #{latitude},
+            altitude = #{altitude},
+            logo = #{logo},
+            dept_id = #{deptId},
+            manager = #{manager},
+            contact = #{contact},
+            phone = #{phone},
+            enable_flag = #{enableFlag},
+            online_status = #{onlineStatus},
+            last_online_time = #{lastOnlineTime},
+            remark = #{remark},
+            update_by = #{updateBy},
+            update_time = #{updateTime}
+        </set>
+        where id = #{id} and del_flag = '0'
+    </update>
+
+    <update id="updateStationOnlineStatus">
+        update ieims_gnss_station
+        set online_status = #{onlineStatus},
+            last_online_time = #{lastOnlineTime},
+            update_time = now()
+        where station_id = #{stationId} and del_flag = '0'
+    </update>
+
+    <delete id="deleteGnssStationById" parameterType="Long">
+        update ieims_gnss_station set del_flag = '1' where id = #{id}
+    </delete>
+
+    <!-- Array 改为 long[] 或者直接删掉 parameterType -->
+    <delete id="deleteGnssStationByIds" parameterType="long[]">
+        update ieims_gnss_station set del_flag = '1' where id in
+        <foreach item="id" collection="array" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </delete>
+
+</mapper>

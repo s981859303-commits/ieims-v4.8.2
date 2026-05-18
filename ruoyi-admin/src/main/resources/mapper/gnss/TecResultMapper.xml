@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.ieims.gnss.mapper.TecResultMapper">
+
+<resultMap type="com.ruoyi.ieims.gnss.domain.TecResult" id="TecResultResult">
+    <id property="id" column="id"/>
+    <result property="stationId" column="station_id"/>
+    <result property="satNo" column="sat_no"/>
+    <result property="satSystem" column="sat_system"/>
+    <result property="ts" column="ts"/>
+    <result property="stec" column="stec"/>
+    <result property="vtec" column="vtec"/>
+    <result property="dcbEstimate" column="dcb_offset"/>
+    <result property="validEpochCount" column="valid_epochs"/>
+    <result property="elevSpan" column="elev_span"/>
+    <result property="qualityFlag" column="quality_flag"/>
+    <result property="dcbCorrected" column="dcb_corrected"/>
+    <result property="slipCount" column="slip_count"/>
+    <result property="mappingFunc" column="mapping_func"/>
+</resultMap>
+
+<!-- 保留原有：条件查询列表 -->
+<select id="selectTecResultList" resultMap="TecResultResult">
+    SELECT * FROM ieims.tec_result_data
+    WHERE 1 = 1
+    <if test="stationId != null and stationId != ''">
+        AND station_id = #{stationId}
+    </if>
+    <if test="satNo != null and satNo != ''">
+        AND sat_no = #{satNo}
+    </if>
+    <if test="beginTime != null">
+        AND ts &gt;= #{beginTime}
+    </if>
+    <if test="endTime != null">
+        AND ts &lt;= #{endTime}
+    </if>
+    ORDER BY ts DESC
+</select>
+
+<!-- 【TDengine】查询指定站点最近N条数据（大屏初始化画曲线用） -->
+<select id="selectLatestByStation" resultMap="TecResultResult">
+    SELECT *
+    FROM ieims.tec_result_data
+    WHERE station_id = #{stationId}
+    ORDER BY ts DESC
+        LIMIT #{limit}
+</select>
+
+<!-- 【TDengine】查询最近1小时各站点汇总统计（大屏顶部卡片用） -->
+<select id="selectLatestSummary" resultType="java.util.HashMap">
+    SELECT
+        station_id                                   AS stationId,
+        COUNT(*)                                     AS totalCount,
+        ROUND(AVG(vtec), 2)                          AS avgVtec,
+        MAX(ts)                                      AS latestTime,
+        SUM(IIF(quality_flag = 'GOOD', 1, 0))        AS goodCount,
+        SUM(IIF(quality_flag = 'SUSPECT', 1, 0))      AS suspectCount,
+        SUM(IIF(quality_flag = 'RELATIVE', 1, 0))     AS relativeCount
+    FROM ieims.tec_result_data
+    WHERE ts >= NOW - 1h
+    GROUP BY station_id
+</select>
+
+</mapper>

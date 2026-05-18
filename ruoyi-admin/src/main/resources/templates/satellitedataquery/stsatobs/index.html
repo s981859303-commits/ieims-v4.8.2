@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="zh" xmlns:th="http://www.thymeleaf.org" xmlns:shiro="http://www.pollix.at/thymeleaf/shiro">
+<head>
+    <th:block th:include="include :: header('卫星观测数据查询')" />
+    <th:block th:include="include :: select2-css" />
+    <th:block th:include="include :: datetimepicker-css" />
+    <style>
+        .realtime-checkbox {
+            margin-left: 15px;
+            margin-top: 5px;
+        }
+        .query-tip {
+            color: #999;
+            font-size: 12px;
+            margin-left: 10px;
+        }
+        .fixed-table-body {
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        .table-loading {
+            position: relative;
+            text-align: center;
+            padding: 20px;
+        }
+        .select2-container--default .select2-selection--single {
+            height: 34px;
+            border-radius: 4px;
+        }
+        .select2-container--default .select2-selection--single .select2-selection__rendered {
+            line-height: 32px;
+        }
+        .select2-container--default .select2-selection--single .select2-selection__arrow {
+            height: 32px;
+        }
+        .time-error {
+            border-color: #a94442 !important;
+            box-shadow: inset 0 1px 1px rgba(0,0,0,.075), 0 0 6px #ce8483 !important;
+        }
+        /* 日期时间选择器样式调整 */
+        .datetimepicker {
+            z-index: 1050 !important;
+        }
+    </style>
+</head>
+<body class="gray-bg">
+<div class="container-div">
+    <div class="row">
+        <div class="col-sm-12 search-collapse">
+            <div class="panel panel-default">
+                <div class="panel-heading">查询条件</div>
+                <div class="panel-body">
+                    <form id="formSearch" class="form-horizontal">
+                        <div class="row">
+                            <div class="col-sm-4">
+                                <div class="form-group">
+                                    <label class="col-sm-3 control-label">站点ID：</label>
+                                    <div class="col-sm-8">
+                                        <select class="form-control select2" id="stationId" name="stationId" style="width: 100%;">
+                                            <option value="">请选择或输入站点ID</option>
+                                        </select>
+                                        <span class="query-tip text-danger">*必填（可输入或选择）</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-sm-4">
+                                <div class="form-group">
+                                    <label class="col-sm-3 control-label">卫星ID：</label>
+                                    <div class="col-sm-8">
+                                        <input type="text" class="form-control" id="satNo" name="satNo" placeholder="请输入卫星ID" />
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-sm-4">
+                                <div class="form-group">
+                                    <label class="col-sm-3 control-label">数据来源：</label>
+                                    <div class="col-sm-8">
+                                        <select class="form-control" id="dataSource" name="dataSource">
+                                            <option value="">全部</option>
+                                            <option value="GSV">GSV（仅星历视图）</option>
+                                            <option value="FUSED">FUSED</option>
+                                            <option value="RTCM">RTCM</option>
+
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col-sm-4">
+                                <div class="form-group">
+                                    <label class="col-sm-3 control-label">日期来源：</label>
+                                    <div class="col-sm-8">
+                                        <select class="form-control" id="dateSource" name="dateSource">
+                                            <option value="">全部</option>
+                                            <option value="ZDA">ZDA（报文解析）</option>
+                                            <option value="SYSTEM">SYSTEM（系统时间）</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-sm-4">
+                                <div class="form-group">
+                                    <label class="col-sm-3 control-label">开始时间：</label>
+                                    <div class="col-sm-8">
+                                        <div class="input-group date">
+                                            <span class="input-group-addon"><i class="fa fa-calendar"></i></span>
+                                            <input type="text" class="form-control" id="queryStartTime" name="queryStartTime"  placeholder="请选择开始时间:yyyy-MM-dd HH:mm:ss">
+                                        </div>
+<!--                                        <input type="text" class="time-input" id="queryStartTime" name="queryStartTime" placeholder="请选择开始时间" />-->
+
+<!--                                        <input type="text" class="form-control datetimepicker-input" id="queryStartTime" name="queryStartTime" placeholder="请选择开始时间" readonly />-->
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-sm-4">
+                                <div class="form-group">
+                                    <label class="col-sm-3 control-label">结束时间：</label>
+                                    <div class="col-sm-8">
+
+                                        <div class="input-group date">
+                                            <span class="input-group-addon"><i class="fa fa-calendar"></i></span>
+                                            <input type="text" class="form-control" id="queryEndTime" name="queryEndTime"  placeholder="请选择结束时间:yyyy-MM-dd HH:mm:ss">
+                                        </div>
+
+<!--                                        <input type="text" class="form-control datetimepicker-input" id="queryEndTime" name="queryEndTime" placeholder="请选择结束时间"   />-->
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="row">
+                            <div class="col-sm-4">
+                                <div class="form-group">
+                                    <label class="col-sm-3 control-label">数据限量：</label>
+                                    <div class="col-sm-8">
+                                        <select class="form-control" id="queryLimit" name="queryLimit">
+                                            <option value="20">20条</option>
+                                            <option value="50">50条</option>
+                                            <option value="100" selected>100条</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-sm-4">
+                                <div class="form-group">
+                                    <div class="col-sm-offset-3 col-sm-8">
+                                        <div class="checkbox realtime-checkbox">
+                                            <label>
+                                                <input type="checkbox" id="isRealtime" name="isRealtime" /> 实时数据（最近5分钟）
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-sm-12 select-table table-striped">
+            <div class="panel panel-default">
+                <div class="panel-heading">数据列表</div>
+                <div class="panel-body">
+                    <div class="btn-group-sm" id="toolbar" role="group">
+                        <a class="btn btn-primary" onclick="searchData()" shiro:hasPermission="satellitedataquery:stsatobs:query">
+                            <i class="fa fa-search"></i> 查询
+                        </a>
+                        <a class="btn btn-success" onclick="exportData()" shiro:hasPermission="satellitedataquery:stsatobs:export">
+                            <i class="fa fa-download"></i> 导出
+                        </a>
+                        <a class="btn btn-info" onclick="refreshRealtimeData()" id="refreshBtn" style="display:none;">
+                            <i class="fa fa-refresh"></i> 刷新实时数据
+                        </a>
+                    </div>
+                    <div id="loadingDiv" style="display:none; text-align:center; padding:20px;">
+                        <i class="fa fa-spinner fa-pulse fa-2x"></i> 加载中...
+                    </div>
+                    <table id="bootstrap-table" data-mobile-responsive="true">
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 隐藏的导出表单 -->
+<form id="exportForm" method="post" style="display:none;"></form>
+
+<th:block th:include="include :: footer" />
+<th:block th:include="include :: select2-js" />
+<th:block th:include="include :: datetimepicker-js" />
+
+<script th:inline="javascript">
+    var prefix = ctx + "satellitedataquery/stsatobs";
+    var tableIns = null;
+    var currentData = [];
+    var startTimePicker = null;
+    var endTimePicker = null;
+
+    $(document).ready(function() {
+        initStationSelect();
+        initTimePickers();
+        initRealtimeCheckbox();
+        initTable();
+    });
+
+    // 初始化站点下拉选择框（支持搜索和手动输入）
+    function initStationSelect() {
+        $.ajax({
+            url: prefix + "/getStationList",
+            type: "POST",
+            dataType: "json",
+            success: function(result) {
+                if (result.code == 0 && result.data) {
+                    var select = $('#stationId');
+                    $.each(result.data, function(index, station) {
+                        if (station.stationId) {
+                            select.append('<option value="' + station.stationId + '">' + station.stationId + ' - ' + (station.stationName || '') + '</option>');
+                        }
+                    });
+
+                    $('#stationId').select2({
+                        placeholder: "请选择或输入站点ID",
+                        allowClear: true,
+                        tags: true,
+                        language: "zh-CN",
+                        width: "100%"
+                    });
+                }
+            },
+            error: function() {
+                console.error("加载站点列表失败");
+                $('#stationId').select2({
+                    placeholder: "请输入站点ID",
+                    allowClear: true,
+                    tags: true,
+                    language: "zh-CN",
+                    width: "100%"
+                });
+            }
+        });
+    }
+
+    // 初始化时间选择器（使用bootstrap-datetimepicker）
+    // 初始化时间选择器（使用bootstrap-datetimepicker）- 增强版
+    function initTimePickers() {
+
+
+
+        // 设置默认时间为最近7天
+        var endDate = new Date();
+        var startDate = new Date();
+        startDate.setDate(startDate.getDate() - 7);
+
+        // 设置开始时间为00:00:00，结束时间为23:59:59
+        startDate.setHours(0, 0, 0);
+        endDate.setHours(23, 59, 59);
+
+        // 格式化日期显示函数（补零）
+        var formatDateTime = function(date) {
+            var year = date.getFullYear();
+            var month = String(date.getMonth() + 1).padStart(2, '0');
+            var day = String(date.getDate()).padStart(2, '0');
+            var hours = String(date.getHours()).padStart(2, '0');
+            var minutes = String(date.getMinutes()).padStart(2, '0');
+            var seconds = String(date.getSeconds()).padStart(2, '0');
+            return year + '-' + month + '-' + day + ' ' + hours + ':' + minutes + ':' + seconds;
+        };
+
+        // 公共配置
+        var commonConfig = {
+            format: 'yyyy-mm-dd hh:ii:ss',      // 完整格式：年月日 时分秒
+            language: 'zh-CN',                  // 中文语言
+            weekStart: 1,                       // 周一为一周开始
+            todayBtn: true,                     // 显示今天按钮
+            autoclose: true,                    // 选择后自动关闭
+            todayHighlight: true,               // 高亮今天
+            startView: 2,                       // 默认显示月份视图
+            minView: 0,                         // 最小视图（分钟）
+            maxView: 4,                         // 最大视图（年份）
+            forceParse: true,                   // 强制解析
+            minuteStep: 1,                      // 分钟步长
+            pickerPosition: 'bottom-left',      // 选择器位置
+            showMeridian: false,                // 不显示上下午（24小时制）
+            showSeconds: true                   // 显示秒
+        };
+
+        startTimePicker =$("#queryEndTime").datetimepicker({
+            format: "yyyy-mm-dd hh:ii:ss",
+            autoclose: true
+        });
+        endTimePicker =$("#queryStartTime").datetimepicker({
+            format: "yyyy-mm-dd hh:ii:ss",
+            autoclose: true
+        });
+        // // 开始时间选择器
+        // startTimePicker = $('#queryStartTime').datetimepicker(commonConfig)
+        //     .on('changeDate', function(ev) {
+        //         // 确保时间格式完整
+        //         var currentVal = $('#queryStartTime').val();
+        //         if (currentVal) {
+        //             // 如果只有日期没有时间，补充默认时间
+        //             if (currentVal.length === 10) {
+        //                 $('#queryStartTime').val(currentVal + ' 00:00:00');
+        //             }
+        //             // 如果只有日期和小时，补充分钟和秒
+        //             else if (currentVal.length === 16) {
+        //                 $('#queryStartTime').val(currentVal + ':00');
+        //             }
+        //             // 如果是日期+小时+分钟，补充秒
+        //             else if (currentVal.length === 19 && !currentVal.endsWith(':00')) {
+        //                 // 已经是完整格式，不需要补充
+        //             }
+        //         }
+        //         validateTimeRange();
+        //     })
+        //     .on('changeYear', function() {
+        //         // 年份改变时确保格式
+        //         setTimeout(function() {
+        //             var val = $('#queryStartTime').val();
+        //             if (val && !val.includes(':')) {
+        //                 $('#queryStartTime').val(val + ' 00:00:00');
+        //             }
+        //         }, 100);
+        //     });
+        //
+        // // 结束时间选择器
+        // endTimePicker = $('#queryEndTime').datetimepicker(commonConfig)
+        //     .on('changeDate', function(ev) {
+        //         var currentVal = $('#queryEndTime').val();
+        //         if (currentVal) {
+        //             if (currentVal.length === 10) {
+        //                 $('#queryEndTime').val(currentVal + ' 23:59:59');
+        //             } else if (currentVal.length === 16) {
+        //                 $('#queryEndTime').val(currentVal + ':59');
+        //             }
+        //         }
+        //         validateTimeRange();
+        //     });
+
+        // 设置默认值（完整格式：YYYY-MM-DD HH:MM:SS）
+        $('#queryStartTime').val(formatDateTime(startDate));
+        $('#queryEndTime').val(formatDateTime(endDate));
+    }
+    function initTimePickers00() {
+        // 设置默认时间为最近7天
+        var endDate = new Date();
+        var startDate = new Date();
+        startDate.setDate(startDate.getDate() - 7);
+
+        // 格式化日期显示
+        var formatDate = function(date) {
+            var year = date.getFullYear();
+            var month = String(date.getMonth() + 1).padStart(2, '0');
+            var day = String(date.getDate()).padStart(2, '0');
+            var hours = String(date.getHours()).padStart(2, '0');
+            var minutes = String(date.getMinutes()).padStart(2, '0');
+            var seconds = String(date.getSeconds()).padStart(2, '0');
+            return year + '-' + month + '-' + day + ' ' + hours + ':' + minutes + ':' + seconds;
+        };
+
+        // 开始时间选择器
+        startTimePicker = $('#queryStartTime').datetimepicker({
+            format: 'yyyy-mm-dd hh:ii:ss',
+            language: 'zh-CN',
+            weekStart: 1,
+            todayBtn: true,
+            autoclose: true,
+            todayHighlight: true,
+            startView: 2,
+            minView: 0,
+            maxView: 4,
+            forceParse: true,
+            minuteStep: 1
+        }).on('changeDate', function(ev) {
+            validateTimeRange();
+        });
+
+        // 结束时间选择器
+        endTimePicker = $('#queryEndTime').datetimepicker({
+            format: 'yyyy-mm-dd hh:ii:ss',
+            language: 'zh-CN',
+            weekStart: 1,
+            todayBtn: true,
+            autoclose: true,
+            todayHighlight: true,
+            startView: 2,
+            minView: 0,
+            maxView: 4,
+            forceParse: true,
+            minuteStep: 1
+        }).on('changeDate', function(ev) {
+            validateTimeRange();
+        });
+
+        // 设置默认值
+        $('#queryStartTime').val(formatDate(startDate));
+        $('#queryEndTime').val(formatDate(endDate));
+    }
+
+    // 校验时间范围合法性
+    function validateTimeRange() {
+        var startTime = $('#queryStartTime').val();
+        var endTime = $('#queryEndTime').val();
+
+        $('#queryStartTime, #queryEndTime').removeClass('time-error');
+
+        if (startTime && endTime) {
+            var start = new Date(startTime.replace(/-/g, '/'));
+            var end = new Date(endTime.replace(/-/g, '/'));
+
+            if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+                return true;
+            }
+
+            if (start > end) {
+                $.modal.alertWarning('开始时间不能大于结束时间');
+                $('#queryStartTime, #queryEndTime').addClass('time-error');
+                return false;
+            }
+
+            var diffDays = (end - start) / (1000 * 60 * 60 * 24);
+            if (diffDays > 90) {
+                $.modal.msgWarning('查询时间范围较大（' + Math.floor(diffDays) + '天），可能影响查询性能');
+            }
+        }
+
+        return true;
+    }
+
+    // 初始化表格
+    function initTable() {
+        var options = {
+            data: currentData,
+            toolbar: '#toolbar',
+            striped: true,
+            cache: false,
+            pagination: false,
+            sortable: false,
+            sidePagination: "client",
+            pageSize: 100,
+            pageList: [20, 50, 100],
+            columns: [
+                {checkbox: true},
+                {field: 'ts', title: '时间戳', width: 180, align: 'center',
+                    formatter: function(value) {
+                        if (!value) return '-';
+                        var date = new Date(value);
+                        return date.toLocaleString('zh-CN');
+                    }},
+                {field: 'stationId', title: '站点ID', width: 120, align: 'center'},
+                {field: 'satNo', title: '卫星ID', width: 80, align: 'center'},
+                {field: 'satSystem', title: '卫星系统', width: 80, align: 'center'},
+                {field: 'dataSource', title: '数据来源', width: 100, align: 'center',
+                    formatter: function(value) {
+                        if (value === 'GSV') return 'GSV(星历视图)';
+                        return value || '-';
+                    }},
+                {field: 'dateSource', title: '日期来源', width: 100, align: 'center',
+                    formatter: function(value) {
+                        if (value === 'ZDA') return 'ZDA(报文解析)';
+                        if (value === 'SYSTEM') return 'SYSTEM(系统时间)';
+                        return value || '-';
+                    }},
+                {field: 'observationTime', title: '观测时间', width: 140, align: 'center'},
+                {field: 'elevation', title: '高度角(°)', width: 80, align: 'center',
+                    formatter: function(value) {
+                        if (value === null || value === undefined) return '-';
+                        return value.toFixed(2);
+                    }},
+                {field: 'azimuth', title: '方位角(°)', width: 80, align: 'center',
+                    formatter: function(value) {
+                        if (value === null || value === undefined) return '-';
+                        return value.toFixed(2);
+                    }},
+                {field: 'snr', title: '信噪比', width: 80, align: 'center',
+                    formatter: function(value) {
+                        if (value === null || value === undefined) return '-';
+                        return value.toFixed(2);
+                    }},
+                {field: 'pseudorangeP1', title: '伪距P1', width: 120, align: 'center',
+                    formatter: function(value) {
+                        if (value === null || value === undefined) return '-';
+                        return value.toFixed(3);
+                    }},
+                {field: 'pseudorangeP2', title: '伪距P2', width: 120, align: 'center',
+                    formatter: function(value) {
+                        if (value === null || value === undefined) return '-';
+                        return value.toFixed(3);
+                    }},
+                {field: 'phaseL1', title: '相位L1', width: 120, align: 'center',
+                    formatter: function(value) {
+                        if (value === null || value === undefined) return '-';
+                        return value.toFixed(3);
+                    }},
+                {field: 'phaseP2', title: '相位P2', width: 120, align: 'center',
+                    formatter: function(value) {
+                        if (value === null || value === undefined) return '-';
+                        return value.toFixed(3);
+                    }},
+                {field: 'isComplete', title: '是否完整', width: 80, align: 'center',
+                    formatter: function(value) {
+                        if (value === true) return '<span class="label label-success">是</span>';
+                        if (value === false) return '<span class="label label-danger">否</span>';
+                        return '-';
+                    }}
+            ]
+        };
+
+        tableIns = $('#bootstrap-table').bootstrapTable(options);
+    }
+
+    function showLoading(show) {
+        if (show) {
+            $('#loadingDiv').show();
+            if (tableIns) {
+                tableIns.bootstrapTable('hideLoading');
+            }
+        } else {
+            $('#loadingDiv').hide();
+        }
+    }
+
+    function loadDataToTable(data) {
+        currentData = data || [];
+        if (tableIns) {
+            tableIns.bootstrapTable('load', currentData);
+        } else {
+            initTable();
+            if (tableIns) {
+                tableIns.bootstrapTable('load', currentData);
+            }
+        }
+    }
+
+    function initRealtimeCheckbox() {
+        $('#isRealtime').change(function() {
+            if ($(this).is(':checked')) {
+                $('#queryStartTime, #queryEndTime').prop('disabled', true);
+                $('#refreshBtn').show();
+                refreshRealtimeData();
+            } else {
+                $('#queryStartTime, #queryEndTime').prop('disabled', false);
+                $('#refreshBtn').hide();
+                loadDataToTable([]);
+            }
+        });
+    }
+
+    function searchData() {
+        var stationId = $('#stationId').val();
+        if (!stationId || $.trim(stationId) === '') {
+            $.modal.alertWarning('请选择或输入站点ID');
+            return;
+        }
+
+        var realtime = $('#isRealtime').is(':checked');
+        if (realtime) {
+            refreshRealtimeData();
+        } else {
+            if (!validateTimeRange()) {
+                return;
+            }
+
+            var queryParams = buildQueryParams();
+            showLoading(true);
+
+            $.ajax({
+                url: prefix + "/list",
+                type: "POST",
+                data: queryParams,
+                dataType: "json",
+                timeout: 30000,
+                success: function(result) {
+                    showLoading(false);
+                    if (result.code == 0) {
+                        var rows = result.rows || [];
+                        loadDataToTable(rows);
+                        if (rows.length === 0) {
+                            $.modal.msgWarning('未查询到数据');
+                        } else {
+                            $.modal.msgSuccess('查询成功，共 ' + rows.length + ' 条记录');
+                        }
+                    } else {
+                        $.modal.msgError(result.msg || '查询失败');
+                        loadDataToTable([]);
+                    }
+                },
+                error: function() {
+                    showLoading(false);
+                    $.modal.msgError('查询数据失败，请检查网络连接');
+                    loadDataToTable([]);
+                }
+            });
+        }
+    }
+
+    function refreshRealtimeData() {
+        var stationId = $('#stationId').val();
+        if (!stationId || $.trim(stationId) === '') {
+            $.modal.alertWarning('请先选择或输入站点ID');
+            $('#isRealtime').prop('checked', false);
+            $('#queryStartTime, #queryEndTime').prop('disabled', false);
+            $('#refreshBtn').hide();
+            return;
+        }
+
+        showLoading(true);
+
+        $.ajax({
+            url: prefix + "/realtime",
+            type: "POST",
+            data: { stationId: $.trim(stationId) },
+            dataType: "json",
+            timeout: 30000,
+            success: function(result) {
+                showLoading(false);
+                if (result.code == 0) {
+                    var rows = result.rows || [];
+                    loadDataToTable(rows);
+                    if (rows.length === 0) {
+                        $.modal.msgWarning('未查询到实时数据');
+                    } else {
+                        $.modal.msgSuccess('实时数据已刷新，共 ' + rows.length + ' 条');
+                    }
+                } else {
+                    $.modal.msgError(result.msg || '查询失败');
+                    loadDataToTable([]);
+                }
+            },
+            error: function() {
+                showLoading(false);
+                $.modal.msgError('获取实时数据失败');
+                loadDataToTable([]);
+            }
+        });
+    }
+
+    function buildQueryParams() {
+        var queryParams = {};
+        queryParams.stationId = $.trim($('#stationId').val());
+        queryParams.satNo = $.trim($('#satNo').val());
+        queryParams.dataSource = $('#dataSource').val();
+        queryParams.dateSource = $('#dateSource').val();
+        queryParams.queryLimit = $('#queryLimit').val();
+        queryParams.isRealtime = false;
+
+        var startTime = $('#queryStartTime').val();
+        var endTime = $('#queryEndTime').val();
+        if (startTime && $.trim(startTime) !== '') {
+            queryParams.queryStartTime = startTime;
+        }
+        if (endTime && $.trim(endTime) !== '') {
+            queryParams.queryEndTime = endTime;
+        }
+
+        return queryParams;
+    }
+
+    function exportData() {
+        var stationId = $('#stationId').val();
+        if (!stationId || $.trim(stationId) === '') {
+            $.modal.alertWarning('请先选择或输入站点ID');
+            return;
+        }
+
+        var queryParams = buildQueryParams();
+        var exportForm = $('#exportForm');
+
+        exportForm.empty();
+        exportForm.attr('action', prefix + "/export");
+
+        for (var key in queryParams) {
+            if (queryParams.hasOwnProperty(key) && queryParams[key] !== undefined && queryParams[key] !== '') {
+                exportForm.append('<input type="hidden" name="' + key + '" value="' + queryParams[key] + '">');
+            }
+        }
+
+        exportForm.submit();
+    }
+</script>
+</body>
+</html>

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+    "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.ieims.gnss.mapper.PhaseScintillationMapper">
+    <!-- 获取需要计算的监测站和卫星列表 -->
+    <select id="getDistinctStationSatellite" resultType="java.util.HashMap">
+        SELECT DISTINCT
+            station_id as stationId,
+            sat_no as satNo
+        FROM st_sat_obs
+        WHERE ts BETWEEN #{startTime} AND #{endTime}
+        AND phase_l1 IS NOT NULL
+        ORDER BY station_id ASC, sat_no ASC
+    </select>
+
+    <!-- 获取指定监测站和卫星最近1分钟内的相位数据 -->
+    <select id="getPhaseData" resultType="java.util.HashMap">
+        SELECT
+            ts,
+            phase_l1 as phaseL1,
+            local_timestamp as localTimestamp
+        FROM st_sat_obs
+        WHERE station_id = #{stationId}
+        AND sat_no = #{satNo}
+        AND ts BETWEEN #{startTime} AND #{endTime}
+        AND phase_l1 IS NOT NULL
+        ORDER BY ts ASC
+    </select>
+
+</mapper>

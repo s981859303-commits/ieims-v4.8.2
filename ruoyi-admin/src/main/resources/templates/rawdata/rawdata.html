@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <th:block th:include="include :: header('原始数据下载')"/>
+    <style>
+        .wrapper {
+            padding: 20px;
+            height: calc(100vh - 120px);
+            display: flex;
+            gap: 15px;
+        }
+        /* 左侧目录 */
+        .left-box {
+            width: 280px;
+            border: 1px solid #e6e6e6;
+            border-radius: 4px;
+            overflow-y: auto;
+            background: #fff;
+        }
+        /* 右侧文件 */
+        .right-box {
+            flex: 1;
+            border: 1px solid #e6e6e6;
+            border-radius: 4px;
+            overflow-y: auto;
+            background: #fff;
+            padding: 15px;
+        }
+        .dir-item {
+            padding: 12px 15px;
+            cursor: pointer;
+            border-bottom: 1px solid #f2f2f2;
+        }
+        .dir-item:hover {
+            background: #f5f7fa;
+        }
+        .dir-item.active {
+            background: #1e88e5;
+            color: #fff;
+        }
+        .file-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+        .file-item {
+            padding: 10px;
+            border: 1px dashed #e3e3e3;
+            border-radius: 4px;
+        }
+        .file-link {
+            color: #1e88e5;
+            text-decoration: none;
+        }
+        .file-link:hover {
+            text-decoration: underline;
+        }
+        .title {
+            padding: 10px 15px;
+            background: #fafafa;
+            font-weight: bold;
+            border-bottom: 1px solid #e6e6e6;
+        }
+    </style>
+</head>
+<body class="gray-bg">
+<div class="wrapper">
+    <!-- 左侧目录 -->
+    <div class="left-box">
+        <div class="title">目录列表</div>
+        <div id="dirList"></div>
+    </div>
+
+    <!-- 右侧文件 -->
+    <div class="right-box">
+        <div class="title">日志文件列表</div>
+        <div id="fileList" class="file-grid" style="margin-top:15px;">
+            <div style="grid-column: span 2;text-align: center;color:#999;">
+                请点击左侧目录查看文件
+            </div>
+        </div>
+    </div>
+</div>
+
+<th:block th:include="include :: footer"/>
+<script th:src="@{/rawdata/rawdata.js}"></script>
+</body>
+</html>

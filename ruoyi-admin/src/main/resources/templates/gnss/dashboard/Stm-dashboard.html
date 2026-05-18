@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="zh" xmlns:th="http://www.thymeleaf.org">
+<head>
+  <th:block th:include="include :: header('GNSS星座图实时监控大屏')" />
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: #0a0e27;
+      font-family: 'Microsoft YaHei', 'Segoe UI', 'PingFang SC', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      overflow: hidden;
+      color: #e0e0e0;
+    }
+
+    /* 大屏容器 */
+    .dashboard {
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      background: radial-gradient(circle at 20% 30%, #0f1235, #080a1a);
+      position: relative;
+    }
+
+    /* 头部标题栏 */
+    .header {
+      height: 80px;
+      background: rgba(0, 0, 0, 0.5);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid rgba(0, 255, 255, 0.3);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 40px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+      z-index: 10;
+    }
+
+    .title-section h1 {
+      font-size: 28px;
+      font-weight: 500;
+      background: linear-gradient(135deg, #00d4ff, #7c4dff);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+      letter-spacing: 2px;
+    }
+
+    .title-section p {
+      font-size: 12px;
+      color: #88aaff;
+      margin-top: 5px;
+    }
+
+    .stats-panel {
+      display: flex;
+      gap: 30px;
+      background: rgba(0, 0, 0, 0.6);
+      padding: 10px 25px;
+      border-radius: 40px;
+      backdrop-filter: blur(5px);
+    }
+
+    .stat-item {
+      text-align: center;
+    }
+
+    .stat-value {
+      font-size: 28px;
+      font-weight: bold;
+      color: #00eaff;
+      font-family: monospace;
+    }
+
+    .stat-label {
+      font-size: 12px;
+      color: #aaa;
+      margin-top: 2px;
+    }
+
+    .legend {
+      display: flex;
+      gap: 20px;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+    }
+
+    .legend-cn {
+      width: 24px;
+      height: 24px;
+      background: #e32119;
+      border-radius: 50%;
+      position: relative;
+      box-shadow: 0 0 8px rgba(227, 33, 25, 0.5);
+    }
+    .legend-cn::after {
+      content: "★";
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: #ffdd44;
+      font-size: 14px;
+      text-shadow: 0 0 2px gold;
+    }
+    .legend-us {
+      width: 24px;
+      height: 24px;
+      background: #3c6e9e;
+      border-radius: 50%;
+      position: relative;
+      overflow: hidden;
+      box-shadow: 0 0 8px rgba(60, 110, 158, 0.5);
+    }
+    .legend-us::before {
+      content: "★";
+      position: absolute;
+      top: 2px;
+      left: 4px;
+      color: white;
+      font-size: 10px;
+    }
+    .legend-us::after {
+      content: "★";
+      position: absolute;
+      bottom: 2px;
+      right: 4px;
+      color: white;
+      font-size: 8px;
+    }
+    .legend-other {
+      width: 20px;
+      height: 20px;
+      background: #777;
+      border-radius: 2px;
+    }
+
+    /* 内容区域 */
+    .content {
+      flex: 1;
+      display: flex;
+      padding: 20px;
+      gap: 20px;
+      overflow: hidden;
+    }
+
+    /* 主图区域 */
+    .polar-container {
+      flex: 3;
+      background: rgba(0, 0, 0, 0.3);
+      border-radius: 24px;
+      backdrop-filter: blur(4px);
+      border: 1px solid rgba(0, 255, 255, 0.2);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      position: relative;
+    }
+
+    canvas {
+      background: radial-gradient(circle at 30% 40%, #0a0e22, #03050b);
+      border-radius: 20px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+      width: auto;
+      height: auto;
+      cursor: pointer;
+    }
+
+    /* 右侧信息面板 */
+    .info-panel {
+      flex: 1;
+      background: rgba(0, 0, 0, 0.5);
+      backdrop-filter: blur(8px);
+      border-radius: 24px;
+      border: 1px solid rgba(0, 255, 255, 0.2);
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      overflow-y: auto;
+    }
+
+    .info-card {
+      background: rgba(0, 0, 0, 0.4);
+      border-radius: 16px;
+      padding: 15px;
+      border-left: 3px solid #00d4ff;
+    }
+
+    .info-title {
+      font-size: 16px;
+      margin-bottom: 12px;
+      color: #00d4ff;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* 卫星列表容器 - 增加最大高度，模块更大 */
+    .sat-list {
+      max-height: 580px;      /* 原400px增加至580px，显示更多卫星数据 */
+      overflow-y: auto;
+      font-size: 12px;
+    }
+
+    /* 表头样式：和卫星条目统一风格，清晰展示列标题 */
+    .sat-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center; /* 垂直居中 */
+        padding: 8px 4px 6px 4px; /* 稍微收缩内边距 */
+        border-bottom: 2px solid rgba(0, 212, 255, 0.6);
+        margin-bottom: 6px;
+        font-weight: bold;
+        color: #88ddff;
+        background: rgba(0, 20, 40, 0.5);
+        border-radius: 4px;
+        font-size: 11px; /* 字体从12px降至11px */
+        letter-spacing: 0.2px;
+        position: sticky;
+        top: 0;
+        backdrop-filter: blur(4px);
+        z-index: 2;
+        white-space: nowrap; /* 关键：强制不换行 */
+    }
+    .sat-header-left {
+        flex: 1.2; /* 给予左侧标识更多空间 */
+        text-align: left;
+    }
+    .sat-header-right {
+        flex: 1.5; /* 给予右侧数据更多空间 */
+        text-align: right;
+        font-family: monospace;
+    }
+
+    .sat-item {
+      display: flex;
+      justify-content: space-between;
+      padding: 6px 8px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .sat-item:hover {
+      background: rgba(0, 212, 255, 0.2);
+      transform: translateX(4px);
+    }
+    .sat-id {
+      font-weight: bold;
+      color: #ffd966;
+    }
+    .cn-flag {
+      color: #ff4d4d;
+    }
+    .us-flag {
+      color: #4d9eff;
+    }
+    .sat-az-el {
+      font-family: monospace;
+      color: #ccc;
+      font-size: 11px;      /* 略微缩小字体确保六位小数完整显示不换行 */
+      white-space: nowrap;   /* 保持一行显示方位角/仰角数据 */
+    }
+
+    ::-webkit-scrollbar {
+      width: 4px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #1a1f3a;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #00d4ff;
+      border-radius: 4px;
+    }
+
+    .connection-status {
+      position: fixed;
+      bottom: 15px;
+      right: 20px;
+      padding: 5px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      background: #000000aa;
+      z-index: 99;
+    }
+    .status-online {
+      color: #2ecc71;
+    }
+    .status-offline {
+      color: #e74c3c;
+    }
+    /* 保证右侧面板滚动条美观 */
+    .info-panel::-webkit-scrollbar {
+      width: 4px;
+    }
+  </style>
+  <!-- 引入WebSocket STOMP依赖 -->
+  <script th:src="@{/js/websocket/sockjs.min.js}"></script>
+  <script th:src="@{/js/websocket/stomp.min.js}"></script>
+</head>
+<body>
+<div class="dashboard">
+  <div class="header">
+    <div class="title-section">
+      <h1>🛰️ GNSS 星座图实时监控 | 极坐标显示</h1>
+      <p>Azimuth Reference: North (0°) · Clockwise (E=90°, S=180°, W=270°) · Radial = Elevation (0° outer → 90° inner)</p>
+    </div>
+    <div class="stats-panel" id="statsPanel">
+      <div class="stat-item">
+        <div class="stat-value" id="totalSatellites">0</div>
+        <div class="stat-label">总卫星数</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-value" id="visibleSatellites">0</div>
+        <div class="stat-label">可见卫星 (>5°)</div>
+      </div>
+      <div class="stat-item">
+        <div class="stat-value" id="avgElevation">0</div>
+        <div class="stat-label">平均仰角 (°)</div>
+      </div>
+    </div>
+    <div class="legend">
+      <div class="legend-item"><div class="legend-cn"></div><span>中国北斗 (BDS)</span></div>
+      <div class="legend-item"><div class="legend-us"></div><span>美国 GPS</span></div>
+      <div class="legend-item"><div class="legend-other"></div><span>其它系统</span></div>
+    </div>
+  </div>
+
+  <div class="content">
+    <div class="polar-container">
+      <canvas id="constellationCanvas" width="800" height="800" style="width:800px; height:800px"></canvas>
+    </div>
+    <div class="info-panel">
+      <div class="info-card">
+        <div class="info-title">📡 实时卫星列表</div>
+        <div class="sat-list" id="satelliteList">
+          <div style="text-align:center;color:#888">等待数据...</div>
+        </div>
+      </div>
+      <div class="info-card">
+        <div class="info-title">🌍 统计信息</div>
+        <div id="countryStats">-</div>
+        <div style="margin-top:12px; font-size:12px; color:#aaa" id="updateTimestamp"></div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="connection-status" id="connStatus">
+  🔌 WebSocket: <span id="wsState" class="status-offline">未连接</span>
+</div>
+
+<th:block th:include="include :: footer" />
+<script th:inline="javascript">
+  /*<![CDATA[*/
+  var ctx = /*[[@{/}]]*/ '';
+  var stompClient = null;
+  var globalSatelliteCache = new Map(); // 缓存池: satNo -> satelliteObject
+  var STALE_TIMEOUT = 2000;             // 2秒无数据则移除卫星
+
+
+  // 坐标系配置
+  const canvas = document.getElementById('constellationCanvas');
+  const ctx2d = canvas.getContext('2d');
+  let width = 800, height = 800;
+  canvas.width = width;
+  canvas.height = height;
+
+  let centerX = width / 2;
+  let centerY = height / 2;
+  let maxRadius = 360;       // 外圈半径 (仰角0°)
+  let minRadius = 80;        // 内圈半径 (仰角90°)
+  // 仰角映射：elevation ∈ [0,90] → radius ∈ [maxRadius, minRadius]
+  function elevationToRadius(elev) {
+    if (elev == null) return maxRadius;
+    let e = Math.min(90, Math.max(0, elev));
+    let t = e / 90;   // 0→0度时t=0半径最大，90度t=1半径最小
+    return maxRadius - t * (maxRadius - minRadius);
+  }
+
+  // 方位角转换：北0°，顺时针，Canvas 角度系统：0° 为东, 逆时针正。需转换
+  function azimuthToCartesian(azimuthDeg, radius) {
+    // azimuth 0° = North, 顺时针。Canvas坐标：0弧度指向东(右)，逆时针为正
+    // 转换公式: angle = (90 - azimuth) * PI/180  因为北指向上方
+    let angleRad = (90 - azimuthDeg) * Math.PI / 180;
+    let x = centerX + radius * Math.cos(angleRad);
+    let y = centerY - radius * Math.sin(angleRad);
+    return {x, y};
+  }
+
+  // 绘制极坐标网格 (北0°，径向刻度: 外圈0°, 内圈75°, 内圈实际仰角75半径映射)
+  function drawGrid() {
+    ctx2d.clearRect(0, 0, width, height);
+    // 绘制背景星空效果（简单光晕）
+    ctx2d.fillStyle = '#03050b';
+    ctx2d.fillRect(0, 0, width, height);
+
+    // 绘制经纬线风格
+    ctx2d.save();
+    ctx2d.strokeStyle = 'rgba(0, 212, 255, 0.3)';
+    ctx2d.fillStyle = 'rgba(100, 150, 255, 0.05)';
+    ctx2d.lineWidth = 1;
+
+    // 径向圆: 仰角0°, 15°, 30°, 45°, 60°, 75°, 90°
+    for (let elev = 0; elev <= 90; elev += 15) {
+      let r = elevationToRadius(elev);
+      if (r < 5) continue;
+      ctx2d.beginPath();
+      ctx2d.arc(centerX, centerY, r, 0, 2 * Math.PI);
+      ctx2d.stroke();
+      // 添加仰角文字标记
+      ctx2d.font = '10px "Segoe UI"';
+      ctx2d.fillStyle = '#66ccff';
+      ctx2d.shadowBlur = 0;
+      if (elev === 0) {
+        ctx2d.fillText('0°', centerX + r + 4, centerY);
+      } else if (elev === 75) {
+        ctx2d.fillText('75°', centerX + r + 4, centerY);
+      } else if (elev === 90) {
+        ctx2d.fillText('90°', centerX + r - 12, centerY - 4);
+      } else {
+        ctx2d.fillText(elev + '°', centerX + r + 2, centerY);
+      }
+    }
+
+    // 绘制方位角线: 0°, 45°, 90°, 135°, 180°, 225°, 270°, 315°
+    let azimuthAngles = [0, 45, 90, 135, 180, 225, 270, 315];
+    azimuthAngles.forEach(az => {
+      let rad = (90 - az) * Math.PI / 180;
+      let x2 = centerX + maxRadius * Math.cos(rad);
+      let y2 = centerY - maxRadius * Math.sin(rad);
+      ctx2d.beginPath();
+      ctx2d.moveTo(centerX, centerY);
+      ctx2d.lineTo(x2, y2);
+      ctx2d.strokeStyle = 'rgba(0, 212, 255, 0.2)';
+      ctx2d.stroke();
+
+      // 添加方向标签
+      let labelRad = (90 - az) * Math.PI / 180;
+      let labelX = centerX + (maxRadius + 12) * Math.cos(labelRad);
+      let labelY = centerY - (maxRadius + 12) * Math.sin(labelRad);
+      let dirText = '';
+      if (az === 0) dirText = 'N';
+      else if (az === 45) dirText = 'NE';
+      else if (az === 90) dirText = 'E';
+      else if (az === 135) dirText = 'SE';
+      else if (az === 180) dirText = 'S';
+      else if (az === 225) dirText = 'SW';
+      else if (az === 270) dirText = 'W';
+      else if (az === 315) dirText = 'NW';
+      ctx2d.fillStyle = '#bbddff';
+      ctx2d.font = 'bold 14px "Segoe UI"';
+      ctx2d.fillText(dirText, labelX - 8, labelY - 4);
+    });
+
+    // 内圈特殊标记 75度圈 (inner circle)
+    let r75 = elevationToRadius(75);
+    ctx2d.beginPath();
+    ctx2d.arc(centerX, centerY, r75, 0, 2 * Math.PI);
+    ctx2d.strokeStyle = '#ffaa44';
+    ctx2d.setLineDash([5, 8]);
+    ctx2d.stroke();
+    ctx2d.setLineDash([]);
+
+    // 绘制中心点标记
+    ctx2d.beginPath();
+    ctx2d.arc(centerX, centerY, 5, 0, 2 * Math.PI);
+    ctx2d.fillStyle = '#ffffff';
+    ctx2d.fill();
+    ctx2d.fillStyle = '#00d4ff';
+    ctx2d.font = '12px monospace';
+    ctx2d.fillText('观测站', centerX + 8, centerY - 4);
+    ctx2d.restore();
+  }
+
+  // 绘制卫星点 (根据country区分样式)
+  function drawSatellites(satellites) {
+    for (let sat of satellites) {
+      let az = sat.azimuth;
+      let elev = sat.elevation;
+      if (az == null || elev == null) continue;
+      let radius = elevationToRadius(elev);
+      let {x, y} = azimuthToCartesian(az, radius);
+      let country = sat.country || 'OTHER';
+      // 根据国家绘制图标
+      ctx2d.save();
+      ctx2d.shadowBlur = 10;
+      ctx2d.shadowColor = 'rgba(0,0,0,0.5)';
+
+      if (country === 'CN') {
+        // 红色圆 + 金星
+        ctx2d.beginPath();
+        ctx2d.arc(x, y, 10, 0, 2 * Math.PI);
+        ctx2d.fillStyle = '#e32119';
+        ctx2d.fill();
+        ctx2d.fillStyle = '#ffdd44';
+        ctx2d.font = '14px "Segoe UI"';
+        ctx2d.fillText('★', x - 5, y + 4);
+      } else if (country === 'US') {
+        ctx2d.beginPath();
+        ctx2d.arc(x, y, 9, 0, 2 * Math.PI);
+        ctx2d.fillStyle = '#3c6e9e';
+        ctx2d.fill();
+        ctx2d.fillStyle = '#ffffff';
+        ctx2d.font = '10px "Segoe UI"';
+        ctx2d.fillText('★', x - 2, y - 2);
+        ctx2d.font = '7px "Segoe UI"';
+        ctx2d.fillText('★', x + 3, y + 2);
+      } else {
+        ctx2d.beginPath();
+        ctx2d.rect(x - 6, y - 6, 12, 12);
+        ctx2d.fillStyle = '#888888';
+        ctx2d.fill();
+      }
+
+      // 显示卫星编号
+      ctx2d.fillStyle = '#ffffff';
+      ctx2d.font = 'bold 11px "Segoe UI"';
+      ctx2d.shadowBlur = 3;
+      ctx2d.fillText(sat.satNo, x + 6, y - 4);
+      // 可选显示仰角小数字
+      ctx2d.font = '9px monospace';
+      ctx2d.fillStyle = '#aaffdd';
+      ctx2d.fillText(Math.round(elev) + '°', x + 6, y + 8);
+      ctx2d.restore();
+    }
+  }
+
+  let currentSatellites = [];
+
+  // 更新右侧面板 (已优化: 添加列标题，卫星列表方位角/仰角保留6位小数)
+  function updateInfoPanel(satellites, stats) {
+    let satListDiv = document.getElementById('satelliteList');
+    if (!satListDiv) return;
+
+    // 构建表头 + 卫星列表内容 (保证标题行始终存在)
+      let headerHtml = `
+      <div class="sat-header">
+        <span class="sat-header-left">🛸 卫星 (PRN/系统)</span>
+        <span class="sat-header-right">📐 方位/仰角 (Az/El)</span>
+      </div>
+    `;
+
+    let bodyHtml = '';
+    if (!satellites || satellites.length === 0) {
+      bodyHtml = '<div style="text-align:center;color:#888; padding:20px;">暂无卫星数据，等待信号...</div>';
+    } else {
+      satellites.forEach(sat => {
+        let flagClass = (sat.country === 'CN') ? 'cn-flag' : ((sat.country === 'US') ? 'us-flag' : '');
+        let countrySymbol = sat.country === 'CN' ? '🇨🇳' : (sat.country === 'US' ? '🇺🇸' : '🛰️');
+
+        // 关键修改: 方位角和仰角均保留6位小数，格式统一，处理空值情况
+        let azFormatted = (sat.azimuth != null && !isNaN(sat.azimuth)) ? sat.azimuth.toFixed(0) : '---.------';
+        let elFormatted = (sat.elevation != null && !isNaN(sat.elevation)) ? sat.elevation.toFixed(0) : '---.------';
+
+        bodyHtml += `<div class="sat-item" title="仰角:${elFormatted}° 方位:${azFormatted}°">
+                        <span class="sat-id ${flagClass}">${countrySymbol} ${sat.satNo}</span>
+                        <span class="sat-az-el">${azFormatted}° / ${elFormatted}°</span>
+                     </div>`;
+      });
+    }
+    satListDiv.innerHTML = headerHtml + bodyHtml;
+
+    // 更新统计卡片信息 (无变动)
+    if (stats) {
+      let countryStats = stats.countryCount || {};
+      let htmlStats = Object.entries(countryStats).map(([c, cnt]) => {
+        let name = c === 'CN' ? '北斗系统' : (c === 'US' ? 'GPS系统' : (c === 'RU' ? '格洛纳斯' : (c === 'EU' ? '伽利略' : '其他')));
+        return `<div>${name} : ${cnt} 颗</div>`;
+      }).join('');
+      document.getElementById('countryStats').innerHTML = htmlStats || '暂无分类数据';
+      if (stats.updateTime) {
+        document.getElementById('updateTimestamp').innerHTML = `最后更新: ${new Date(stats.updateTime).toLocaleTimeString()}`;
+      }
+    }
+    // 顶部统计数据更新（保留原来逻辑，平均仰角保留1位小数即可，不影响整体要求）
+    let total = stats?.totalSatellites ?? (satellites ? satellites.length : 0);
+    let visibleCount = stats?.visibleSatellites ?? (satellites ? satellites.filter(s => s.elevation > 5).length : 0);
+    let avgElev = stats?.averageElevation;
+    if (avgElev === undefined && satellites && satellites.length) {
+      let sum = satellites.reduce((acc, s) => acc + (s.elevation || 0), 0);
+      avgElev = (sum / satellites.length).toFixed(1);
+    } else if (avgElev !== undefined) {
+      avgElev = typeof avgElev === 'number' ? avgElev.toFixed(1) : avgElev;
+    } else {
+      avgElev = '--';
+    }
+    document.getElementById('totalSatellites').innerText = total;
+    document.getElementById('visibleSatellites').innerText = visibleCount;
+    document.getElementById('avgElevation').innerText = avgElev;
+  }
+
+  // 渲染全部
+  function render(data) {
+    if (!data || !data.detailList) return;
+    let satellites = data.detailList;
+    currentSatellites = satellites;
+    drawGrid();
+    drawSatellites(satellites);
+    updateInfoPanel(satellites, data);
+  }
+
+  function getCountryBySystem(satSystem) {
+    if (!satSystem) return 'OTHER';
+    let sys = satSystem.toUpperCase();
+    if (sys.includes('BDS') || sys.includes('COMPASS') || sys.includes('BEIDOU')) return 'CN';
+    if (sys.includes('GPS')) return 'US';
+    if (sys.includes('GLONASS')) return 'RU';
+    if (sys.includes('GALILEO')) return 'EU';
+    return 'OTHER';
+  }
+
+
+  // 1. 提取出的独立消息处理函数
+  function onMessage(message) {
+      try {
+          var body = JSON.parse(message.body);
+          if (body.extraData) {
+              var constellationData = JSON.parse(body.extraData);
+              var now = Date.now();
+
+              // 1. 核心改进：更新缓存池，而不是直接渲染
+              if (constellationData.detailList && Array.isArray(constellationData.detailList)) {
+                  constellationData.detailList.forEach(sat => {
+                      // 为每颗卫星打上最后更新时间戳
+                      sat.lastUpdate = now;
+                      // 如果没有国家字段，补全
+                      if (!sat.country && sat.satSystem) {
+                          sat.country = getCountryBySystem(sat.satSystem);
+                      }
+                      // 放入 Map（相同卫星号会自动更新）
+                      globalSatelliteCache.set(sat.satNo, sat);
+                  });
+              }
+
+              // 2. 清理超过 3 秒没更新的“僵尸”卫星
+              for (let [satNo, sat] of globalSatelliteCache) {
+                  if (now - sat.lastUpdate > STALE_TIMEOUT) {
+                      globalSatelliteCache.delete(satNo);
+                  }
+              }
+
+              // 3. 构造合并后的完整数据对象进行渲染
+              var mergedList = Array.from(globalSatelliteCache.values());
+
+              // 重新计算统计信息（基于合并后的数据）
+              var finalData = {
+                  detailList: mergedList,
+                  totalSatellites: mergedList.length,
+                  visibleSatellites: mergedList.filter(s => s.elevation > 5.0).length,
+                  averageElevation: (mergedList.reduce((acc, s) => acc + s.elevation, 0) / (mergedList.length || 1)).toFixed(1),
+                  countryCount: {}
+              };
+
+              // 重新统计国家/系统数量
+              mergedList.forEach(s => {
+                  let c = s.country || 'OTHER';
+                  finalData.countryCount[c] = (finalData.countryCount[c] || 0) + 1;
+              });
+
+              // 4. 调用原有渲染函数，此时数据是稳定的
+              render(finalData);
+          }
+      } catch (e) {
+          console.error('天空图解析渲染错误', e);
+      }
+  }
+
+  // 2. 修改连接函数，引用上面的 onMessage
+  function connectWebSocket() {
+      let socket = new SockJS(ctx + 'ws/connect');
+      stompClient = Stomp.over(socket);
+      stompClient.debug = null;
+      stompClient.connect({}, function(frame) {
+          document.getElementById('wsState').innerText = '已连接';
+          document.getElementById('wsState').className = 'status-online';
+
+          // 订阅并指定回调函数为 onMessage
+          stompClient.subscribe('/topic/constellation', onMessage);
+
+      }, function(error) {
+          document.getElementById('wsState').innerText = '连接失败';
+          document.getElementById('wsState').className = 'status-offline';
+          setTimeout(connectWebSocket, 5000);
+      });
+  }
+
+  // 页面启动
+  $(document).ready(function() {
+    drawGrid();  // 空网格
+    connectWebSocket();
+  });
+  /*]]>*/
+</script>
+</body>
+</html>
